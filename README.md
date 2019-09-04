@@ -3,7 +3,7 @@ congressional-district-boundaries
 Jeffrey B. Lewis, Brandon DeVine, and Lincoln Pritcher with Kenneth C. Martis
 
 The webpage for this project can be found at
-http://amypond.sscnet.ucla.edu/districts.
+http://cdmaps.polisci.ucla.edu/districts.
 
 Description
 -----------
@@ -50,7 +50,7 @@ How to cite
 Jeffrey B. Lewis, Brandon DeVine, Lincoln Pitcher, and Kenneth
 C. Martis. (2013) Digital Boundary Definitions of U.S. Congressional
 Districts, 1789-2012. [Data file and code book]. Retrieved from
-http://amypond.sscnet.ucla.edu/districts on [date of download].
+http://cdmaps.polisci.ucla.edu on [date of download].
 
 If you use the shapes in your research, please send along an email
 describing your project and giving a citations to resulting to working
@@ -105,7 +105,7 @@ described in the documentation files below.
 
 Access to Excel .xlsx files containing references and documentation
 related to how each district shape was drawn are available at the
-http://amypond.sscnet.ucla.edu/districts. Access to these files is
+http://cdmaps.polisci.ucla.edu. Access to these files is
 limited due to possible copyright issues (some of the documentation
 files include images of maps). To obtain access to these materials for
 research purposes, please email jblewis@ucla.edu. File names indicate
