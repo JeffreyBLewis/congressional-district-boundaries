@@ -3,7 +3,7 @@ congressional-district-boundaries
 Jeffrey B. Lewis, Brandon DeVine, and Lincoln Pritcher with Kenneth C. Martis
 
 The webpage for this project can be found at
-http://cdmaps.polisci.ucla.edu/districts.
+http://cdmaps.polisci.ucla.edu.
 
 Description
 -----------
