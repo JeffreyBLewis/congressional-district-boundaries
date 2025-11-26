@@ -1,0 +1,100 @@
+---
+title: "Remove Alexandria City from District 9 of Virginia from the 63rd to the 72nd"
+author: "Jeff Lewis"
+date: 2025-11-13
+format: html
+editor: visual
+---
+
+```{r}
+#| include: false
+library(tidyverse)
+library(sf)
+library(ggthemes)
+```
+
+## Summary
+
+Deven Caughey (<a href="mailto:caughey\@mit.edu">caughey\@mit.edu</a>) 
+wrote:
+
+>Hi Jeff,
+>
+>I came across a possible error in the district shape files you posted at https://cdmaps.polisci.ucla.edu/. It seems that in the 63rd >through 72nd congresses, two Virginia congressional districts are listed as including Alexandria City. You can see this with >something like the following code ...
+>
+> I believe that district 8 is the correct one. District 9 is on the other side of the state.
+>
+>Thanks for making this data available!
+>Devin
+
+This appears to be correct:
+
+```{r}
+#| message: false
+shp_va <- st_read("Virginia_063_to_072.geojson") 
+shp_va9 <- shp_va |> filter(district == 9) 
+alex <- st_cast(shp_va9$geometry, "POLYGON")[[1]]  |> 
+                                 st_centroid() |> 
+                                 st_buffer(0.25) |>
+          st_sfc(crs = 4269) |> 
+          st_sf() |> 
+          mutate(place = "Alexandria")
+shp_va9 |> 
+  ggplot() +
+  geom_sf(fill = "#DDDDFF") +
+  theme_map() +
+  geom_sf(data = st_union(shp_va), 
+          fill = NA) +
+  geom_sf(data = alex, fill = NA, color = "blue") +
+  geom_sf_label(data = alex, aes(label = place),
+                fill = NA, color = "blue", 
+                position = position_nudge(x = NULL, y = 4e4)) +
+  coord_sf(crs = "EPSG:3968")
+```
+## Patch
+
+```{r}
+new_shp_va <- shp_va |> 
+  filter(district != 9) |> 
+  bind_rows(
+    shp_va |> 
+      filter(district == 9) |> 
+      mutate(geometry = st_sfc(st_cast(geometry, "POLYGON")[[2]], crs = "EPSG:4269"),
+             county = str_replace(county, '\\"Alexandria City\\",', ''),
+             rnote = str_replace(rnote, '\"Exists in NHGIS data shapefiles as Alexandria City\",', ''),
+             page = str_replace(page, '276,', ''),
+             law = str_replace(law, "NULL,", ""),
+             note = str_replace(note, "NULL,", ""),
+             bestdec = str_replace(bestdec, "1910,", ""),
+             districtsi = str_replace(districtsi, "30410,", ""),
+             lastchange = Sys.Date()
+      )
+  ) |> 
+  arrange(district)
+```
+
+## Checks
+
+Attributes of the corrected district 9 (after removing elements related to Alexandria):
+
+```{r}
+glimpse(new_shp_va |> 
+          filter(district == 9))
+```
+
+Map of the correct district 9 without Alexandria:
+
+```{r}
+new_shp_va |> 
+  filter(district == 9) |> 
+  ggplot() +
+    geom_sf(fill = "#DDDDFF") +
+    theme_map() +
+    coord_sf(crs = "EPSG:3968")
+```
+
+## Write corrected district shapes
+
+```{r}
+st_write(new_shp_va, "../../GeoJson/Virginia_063_to_072.geojson", delete_dsn = TRUE)
+```

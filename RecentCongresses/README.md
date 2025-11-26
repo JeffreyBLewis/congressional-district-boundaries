@@ -1,0 +1,1 @@
+This folder contains files used to produce recent districts that the Census did not generate shapes for.

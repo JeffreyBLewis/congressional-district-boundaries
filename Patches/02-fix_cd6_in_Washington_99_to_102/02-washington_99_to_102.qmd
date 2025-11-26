@@ -1,0 +1,87 @@
+---
+title: "Remove non-contiguous bit from District 6 of Washington from the 99th to the 102nd"
+author: "Jeff Lewis"
+date: 2025-11-13
+format: html
+editor: source
+---
+
+```{r}
+#| include: false
+library(tidyverse)
+library(sf)
+library(ggthemes)
+```
+
+## Summary
+
+Oliva Smith (<a href="mailto:smitho\@brennan.law.nyu.edu">smitho\@brennan.law.nyu.edu</a>) wrote:
+
+>Dear Professor Lewis, 
+>
+>I hope this email finds you well. My name is Olivia Smith, and I am a MPP student at Duke University. This summer I am >interning at the Brennan Center for Justice and have been using your US Congressional District Shapefiles for >redistricting analysis. I wanted to notify you of an error I found in the 99th Congress data. The 6th district of >Washington appears to have a non-contiguous section that should be in the 8th district. I hope this information is >helpful and thank you for making this incredibly helpful data available! 
+>
+>Best,
+>Olivia Smith
+
+This appears to be correct:
+
+```{r}
+#| message: false
+shp_wa <- st_read("Washington_099_to_102.geojson") 
+shp_wa6 <- shp_wa |> filter(district == 6)  
+piece <- st_cast(shp_wa6$geometry, "POLYGON")[[1]]  |>
+                                st_centroid() |>
+                                st_buffer(0.55) |>
+         st_sfc(crs = 4269) |>
+         st_sf() |>
+         mutate(place = "Incorrect non-contiguous bit of CD 6")
+shp_wa |> 
+  filter(district %in% c(6, 8)) |> 
+  ggplot() +
+  geom_sf(aes(fill = as.character(district)), alpha = 0.2) +
+  geom_sf(data = shp_wa6, fill = NA, color = "red") +
+  theme_map() +
+  geom_sf(data = piece, fill = NA, color = "blue") +
+  geom_sf_label(data = piece, aes(label = place),
+                 fill = NA, color = "blue", 
+                position = position_nudge(x = NULL, y = -3e4)) +
+  coord_sf(crs = "EPSG:2927")
+```
+
+This problem had been "fixed" previously, but the old versions of districts 6 and 8 were not 
+removed when the new ones where inserted. 
+
+```{r}
+shp_wa |> 
+  st_drop_geometry() |> 
+  filter(district %in% c(6,8)) |> 
+  select(district, note) 
+```
+The old versions must be removed.
+
+## Patch
+
+```{r}
+new_shp_wa <- shp_wa |> 
+  slice(-c(6, 9)) 
+```
+
+## Checks
+
+Map of the correct districts 6 and 8:
+
+```{r}
+new_shp_wa |> 
+  filter(district %in% c(6, 8)) |> 
+  ggplot() +
+  geom_sf(aes(fill = as.character(district)), alpha = 0.2) +
+  theme_map() +
+  coord_sf(crs = "EPSG:2927")
+```
+
+## Write corrected district shapes
+
+```{r}
+st_write(new_shp_wa, "../../GeoJson/Washington_099_to_102.geojson", delete_dsn = TRUE)
+```

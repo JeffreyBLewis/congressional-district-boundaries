@@ -1,0 +1,2 @@
+This folder contains patches to particular state plans.  In each case, the patch contains the geojson file that is being patched and a Quarto
+document that describes the change and provides the R code used to make the change.

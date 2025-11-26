@@ -8,24 +8,35 @@ http://cdmaps.polisci.ucla.edu.
 Description
 -----------
 
-These repositiories provides digital boundary definitions in GeoJson
+This repository provides digital boundary definitions in GeoJson
 format for every U.S. Congressional District in use between 1789 and
 2012. These were produced as part of NSF grant SBE-SES-0241647 between
 2009 and 2013.
 
-The current release of these data is experimental. We have had done a
-good deal of work to validate all of the shapes. However, it is quite
-likely that some irregulaties remain. Please email jblewis@ucla.edu
-with questions or suggestions for improvement. We hope to have a
-ticketing system for bugs and a versioning system up soon. The
-district definitions currently available should be considered a
-pre-release version.
+This is the new Version 2.0 repository. Like the previous version, it
+contains definitions for every Congressional district used throughout the
+history of Congress in GeoJSON format.  In the previous release, the
+GeoJSON files were lower-resolution versions of the shapefile found on
+the website provided on GitHub, provided for quick quality checking and for
+making maps.  In this new release, the GeoJSON files provide the same
+(higher) resolution as the shapefiles.  The GeoJSON files are also the canonical
+representation of the data that we will be updating moving forward (the
+project had previously been managed in PostGIS).  The shapefiles presented
+on the website are now generated from the GeoJSON here.  
 
-Many districts were formed by aggregragating complete county shapes
+Updates and maintaince of the collection moving forward uses the`targets` 
+workflow manager in `R` and a simple patching system.  All of the
+code used is provided in this repository.
+
+We have done a good deal of work to validate all of the shapes. However, some 
+irregularities likely remain. Please email jblewis@ucla.edu
+with questions or suggestions for improvement.
+
+Many districts were formed by aggregating complete county shapes
 obtained from the National Historical Geographic Information System
 (NHGIS) project and the Newberry Library's Atlas of Historical County
-Boundaries. Where Congressional Districts boundaries did not coincide
-with county boundaries districts shapes were constructed
+Boundaries. Where Congressional District boundaries did not coincide with 
+county boundaries,  district shapes were constructed
 district-by-district using a wide variety of legal and cartographic
 resources. Detailed descriptions of how particular districts were
 constructed and the authorities upon which we relied are available (at
