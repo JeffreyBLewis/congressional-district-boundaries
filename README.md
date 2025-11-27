@@ -8,24 +8,35 @@ http://cdmaps.polisci.ucla.edu.
 Description
 -----------
 
-These repositiories provides digital boundary definitions in GeoJson
+This repository provides digital boundary definitions in GeoJson
 format for every U.S. Congressional District in use between 1789 and
 2012. These were produced as part of NSF grant SBE-SES-0241647 between
 2009 and 2013.
 
-The current release of these data is experimental. We have had done a
-good deal of work to validate all of the shapes. However, it is quite
-likely that some irregulaties remain. Please email jblewis@ucla.edu
-with questions or suggestions for improvement. We hope to have a
-ticketing system for bugs and a versioning system up soon. The
-district definitions currently available should be considered a
-pre-release version.
+This is the new Version 2.0 repository. Like the previous version, it
+contains definitions for every Congressional district used throughout the
+history of Congress in GeoJSON format.  In the previous release, the
+GeoJSON files were lower-resolution versions of the shapefile found on
+the website provided on GitHub, provided for quick quality checking and for
+making maps.  In this new release, the GeoJSON files provide the same
+(higher) resolution as the shapefiles.  The GeoJSON files are also the canonical
+representation of the data that we will be updating moving forward (the
+project had previously been managed in PostGIS).  The shapefiles presented
+on the website are now generated from the GeoJSON here.  
 
-Many districts were formed by aggregragating complete county shapes
+Updates and maintenance of the collection moving forward uses the`targets` 
+workflow manager in `R` and a simple patching system.  All of the
+code used is provided in this repository.
+
+We have done a good deal of work to validate all of the shapes. However, some 
+irregularities likely remain. Please email jblewis@ucla.edu
+with questions or suggestions for improvement.
+
+Many districts were formed by aggregating complete county shapes
 obtained from the National Historical Geographic Information System
 (NHGIS) project and the Newberry Library's Atlas of Historical County
-Boundaries. Where Congressional Districts boundaries did not coincide
-with county boundaries districts shapes were constructed
+Boundaries. Where Congressional District boundaries did not coincide with 
+county boundaries,  district shapes were constructed
 district-by-district using a wide variety of legal and cartographic
 resources. Detailed descriptions of how particular districts were
 constructed and the authorities upon which we relied are available (at
@@ -52,15 +63,15 @@ C. Martis. (2013) Digital Boundary Definitions of U.S. Congressional
 Districts, 1789-2012. [Data file and code book]. Retrieved from
 http://cdmaps.polisci.ucla.edu on [date of download].
 
-If you use the shapes in your research, please send along an email
-describing your project and giving a citations to resulting to working
-papers and publications Geographic information
+If you use the shapes in your research, please send an email
+describing your project and giving citations to related working
+papers and publications.
 
 The district definitions are organized by state and the range of
 Congresses in which they were operative.  Each unique district has
 been given a unique identifier with the following format SSNNBBBEEE
-where SS is the state fips code, NN is the district number, BBB is the
-number of first Congress in which that district was used and EEE is
+where SS is the state FIPS code, NN is the district number, BBB is the
+number of the first Congress in which that district was used and EEE is 
 the last Congress in which that district was used.
 
 District geographic definitions are encoded in US Census standard
@@ -70,7 +81,7 @@ unprojected format using the NAD83 coordinate datum (PostGIS SRID
 +proj=longlat +ellps=GRS80 +towgs84=0,0,0,0,0,0,0 +no_defs
 Download
 
-The files provide districts shapes for each Congress in ERSI's
+The files provide district shapes for each Congress in ERSI's
 Shapefile format. The current files are version 1.00 (June 20, 2013).
 
 
@@ -91,8 +102,8 @@ discrepancies between the Voteview data and these shapes is available
 here.
 
 Starting with the 103rd Congress, district boundary files are produced
-by the US Census and we rely on those shapes for Congresses beginning
-with the 103rd. US Census Tigerline files associated the 1990
+by the US Census, and we rely on those shapes for Congresses beginning
+with the 103rd. US Census Tigerline files associated with the 1990
 Decennial Census were used to construct districts from the 98th to the
 102nd Congress (except where noted in the documentation files
 below). For Congresses between the 1st and the 97th, district
@@ -104,14 +115,11 @@ a case-by-case basis. Sources relied upon for these districts are
 described in the documentation files below.
 
 Access to Excel .xlsx files containing references and documentation
-related to how each district shape was drawn are available at the
+related to how each district shape was drawn is available at
 http://cdmaps.polisci.ucla.edu. Access to these files is
 limited due to possible copyright issues (some of the documentation
 files include images of maps). To obtain access to these materials for
-research purposes, please email jblewis@ucla.edu. File names indicate
-the state and range of Congresses covered by districts described in a
-particular documentation file.  [Click to show available documentation
-files]
+research purposes, please email jblewis@ucla.edu. 
 
-Copyright Jeffrey B. Lewis, 2013.
+Copyright Jeffrey B. Lewis, 2025.
 

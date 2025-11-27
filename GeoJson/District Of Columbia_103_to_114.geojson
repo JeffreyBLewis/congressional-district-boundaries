@@ -1,0 +1,8 @@
+{
+"type": "FeatureCollection",
+"name": "District Of Columbia_103_to_114",
+"crs": { "type": "name", "properties": { "name": "urn:ogc:def:crs:EPSG::4269" } },
+"features": [
+{ "type": "Feature", "properties": { "statename": "District Of Columbia", "district": 98.0, "startcong": 103.0, "endcong": 114.0, "id": "0NA103114098", "districtsi": "", "county": "", "page": "", "law": "", "note": "", "bestdec": "", "finalnote": "{\"From US Census website\"}", "rnote": "", "lastchange": "2016-05-29 16:44:10.857626", "fromcounty": "F", "statefp": "" }, "geometry": { "type": "GeometryCollection", "geometries": [ ] } }
+]
+}
