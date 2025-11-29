@@ -16,7 +16,7 @@ format for every U.S. Congressional District in use between 1789 and
 This is the new Version 2.0 repository. Like the previous version, it
 contains definitions for every Congressional district used throughout the
 history of Congress in GeoJSON format.  In the previous release, the
-GeoJSON files were lower-resolution versions of the shapefile found on
+GeoJSON files were lower-resolution versions of the shapefiles found on
 the website provided on GitHub, provided for quick quality checking and for
 making maps.  In this new release, the GeoJSON files provide the same
 (higher) resolution as the shapefiles.  The GeoJSON files are also the canonical
