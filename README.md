@@ -10,8 +10,9 @@ Description
 
 This repository provides digital boundary definitions in GeoJson
 format for every U.S. Congressional District in use between 1789 and
-2012. These were produced as part of NSF grant SBE-SES-0241647 between
-2009 and 2013.
+2025. These were produced as part of NSF grant SBE-SES-0241647 between
+2009 and 2013, augmented with boundaries published by the US Census Bureau or state-level 
+agencies since then.
 
 This is the new Version 2.0 repository. Like the previous version, it
 contains definitions for every Congressional district used throughout the
