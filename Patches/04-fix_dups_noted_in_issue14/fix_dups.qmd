@@ -1,0 +1,276 @@
+---
+title: "Remove Duplicate Districts From Issue#14"
+format: html
+editor: source
+---
+
+## Overview
+
+@caseydrier pointed out duplicate districts in several geoJson files in 
+[Issue #14](https://github.com/JeffreyBLewis/congressional-district-boundaries/issues/14).  Not sure how these survived de-duplication in the processing of the original congress-by-congress files, but I simply remove them here.
+
+## `Alaska_103_to_114.geojson`
+
+```{r}
+#| message: false
+library(tidyverse)
+library(sf)
+
+GEOJSON_FILE <- "../../GeoJson/Alaska_103_to_114.geojson"
+gdat <- st_read(GEOJSON_FILE)
+```
+
+There are indeed two shapes!
+
+```{r}
+glimpse(gdat)
+```
+
+They are identical!
+
+```{r}
+identical(gdat$geometry[1], gdat$geometry[2])
+```
+
+Writing a de-duplicated GEOJSON:
+
+```{r}
+unlink(GEOJSON_FILE) 
+distinct(gdat) |> 
+  glimpse() |>
+  st_write(GEOJSON_FILE, append=FALSE)
+```
+
+
+## `California_103_to_107.geojson`
+
+```{r}
+GEOJSON_FILE <- "../../GeoJson/California_103_to_107.geojson"
+gdat <- st_read(GEOJSON_FILE)
+```
+
+There are indeed two distinct CD 13 shapes!
+
+```{r}
+gdat |> 
+  count(district) |> 
+  filter(n > 1)
+```
+
+They are the same!
+
+```{r}
+dup <- gdat |> filter(district == 13) 
+all(st_equals(dup[1], dup[2], sparse = FALSE))
+```
+
+```{r}
+unlink(GEOJSON_FILE) 
+distinct(gdat) |> 
+  glimpse() |>
+  st_write(GEOJSON_FILE, append=FALSE)
+```
+
+
+## `Maryland_103_to_107.geojson`
+
+```{r}
+GEOJSON_FILE <- "../../GeoJson/Maryland_103_to_107.geojson"
+gdat <- st_read(GEOJSON_FILE)
+```
+
+There are indeed two distinct CD 5 shapes!
+
+```{r}
+gdat |> 
+  count(district) |> 
+  filter(n > 1)
+```
+
+They are the same!
+
+```{r}
+dup <- gdat |> filter(district == 5) 
+all(st_equals(dup[1], dup[2], sparse = FALSE))
+```
+
+```{r}
+unlink(GEOJSON_FILE) 
+distinct(gdat) |> 
+  glimpse() |>
+  st_write(GEOJSON_FILE, append=FALSE)
+```
+
+## `Massachusetts_103_to_107.geojson`
+
+```{r}
+GEOJSON_FILE <- "../../GeoJson/Massachusetts_103_to_107.geojson"
+gdat <- st_read(GEOJSON_FILE)
+```
+
+There are indeed two distinct CD 9 shapes!
+
+```{r}
+gdat |> 
+  count(district) |> 
+  filter(n > 1)
+```
+
+They are the same!
+
+```{r}
+dup <- gdat |> filter(district == 9) 
+all(st_equals(dup[1], dup[2], sparse = FALSE))
+```
+
+```{r}
+unlink(GEOJSON_FILE) 
+distinct(gdat) |> 
+  glimpse() |>
+  st_write(GEOJSON_FILE, append=FALSE)
+```
+
+## `New York_099_to_102.geojson`
+
+```{r}
+GEOJSON_FILE <- "../../GeoJson/New York_099_to_102.geojson"
+gdat <- st_read(GEOJSON_FILE)
+```
+
+There are indeed two distinct CD 29 shapes!
+
+```{r}
+gdat |> 
+  count(district) |> 
+  filter(n > 1)
+```
+
+They are the same!
+
+```{r}
+dup <- gdat |> filter(district == 19) 
+all(st_equals(dup[1], dup[2], sparse = FALSE))
+```
+
+```{r}
+unlink(GEOJSON_FILE) 
+distinct(gdat) |> 
+  glimpse() |>
+  st_write(GEOJSON_FILE, append=FALSE)
+```
+
+
+## `Washington_103_to_107.geojson`
+
+```{r}
+GEOJSON_FILE <- "../../GeoJson/Washington_103_to_107.geojson"
+gdat <- st_read(GEOJSON_FILE)
+```
+
+There are indeed two distinct CD 9 shapes!
+
+```{r}
+gdat |> 
+  count(district) |> 
+  filter(n > 1)
+```
+
+They are the same!
+
+```{r}
+dup <- gdat |> filter(district == 3) 
+all(st_equals(dup[1], dup[2], sparse = FALSE))
+```
+
+```{r}
+unlink(GEOJSON_FILE) 
+distinct(gdat) |> 
+  glimpse() |>
+  st_write(GEOJSON_FILE, append=FALSE)
+```
+
+
+## `New York_098_to_098.geojson`, `New York_098_to_102.geojson`, and `New York_099_to_102.geojson`
+
+
+```{r}
+nydat <- bind_rows(
+            st_read("../../GeoJson/New York_098_to_098.geojson") |> 
+              mutate(fn = "098_to_098"),
+            st_read("../../GeoJson/New York_098_to_102.geojson") |> 
+              mutate(fn = "098_to_102"),
+            st_read("../../GeoJson/New York_099_to_102.geojson") |> 
+              mutate(fn = "099_to_102"))
+```
+
+`New York_098_to_102.geojson`  Only contains one district, it is artifact of processing and will removed from the collection.
+
+```{r}
+nydat |> 
+  st_drop_geometry() |>
+  count(fn)
+```
+
+The question then is do we need separate shapes for the 98th and the 99th through 102nd. The 98th districts are marginally different from the 99th through 102nd:
+
+```{r}
+nydat |>
+  mutate(area.1 = as.numeric(st_area(geometry))) |>
+  st_intersection(nydat) |> 
+  glimpse() |>
+  filter(fn != fn.1) |> 
+  mutate(over_area = as.numeric(st_area(geometry)),
+         overlap = over_area/area.1) |> 
+  filter(overlap > 0.01,
+         fn %in% c("098_to_098"),
+         fn.1 %in% c("099_to_102")) |>
+  select(fn, fn.1, district, district.1, overlap) |> 
+  st_drop_geometry() |>
+  arrange(district) |> 
+  gt::gt()
+```
+
+
+Here is perhaps the biggest difference:
+```{r}
+library(osmdata)
+library(ggmap)
+ny_bb <- nydat |> 
+          filter(district == 27) |>
+          st_buffer(dist = 1e4) |>
+          st_bbox() |> 
+          as.matrix() |>
+          as.data.frame() |>
+          rownames_to_column() |> 
+          separate_wider_regex(
+            cols = rowname,
+            patterns = c(x = "^[xy]",
+                         y = ".+")
+          ) |> 
+  pivot_wider(names_from = y, values_from = V1) |>
+  column_to_rownames("x") |>
+  as.matrix() 
+
+ny27_map <- get_map(ny_bb, 
+                    maptype = "roadmap")
+```
+
+
+```{r}
+ggmap(ny27_map) +
+  geom_sf(data = nydat |> filter(fn == "098_to_098",
+                                 district %in% c(27)),
+          inherit.aes = FALSE,
+          fill = NA,
+          linewidth = 2,
+          color = "grey",
+          alpha = 0.01) +
+  geom_sf(data = nydat |> filter(fn == "099_to_102",
+                                 district %in% c(27)),
+          inherit.aes = FALSE,
+          color = "red",
+          fill = NA) +
+  ggthemes::theme_map()
+```
+
+I need to determine whether there was actual change or whether there was a correction that should have been applied to the 98th was not.  For now, I will leave things as they are.
