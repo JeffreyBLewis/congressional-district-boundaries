@@ -100,7 +100,7 @@ list(
                   ENDCONG = 118,
                   NOTE = "From `tigris` using year = 2022.",
                   geometry = geometry),
-      ## 118th Congress
+      ## 119th Congress
       congressional_districts(year = 2024, cb = TRUE, resolution = "500k") |>
         transmute(STATEFP = STATEFP,
                   DISTRICT = CD119FP, 
