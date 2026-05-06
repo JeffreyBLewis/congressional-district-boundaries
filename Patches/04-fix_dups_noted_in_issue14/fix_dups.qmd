@@ -1,0 +1,190 @@
+---
+title: "Remove Duplicate Districts From Issue#14"
+format: html
+editor: source
+---
+
+## Overview
+
+@caseydrier pointed out duplicate districts in several geoJson files in 
+[Issue #14](https://github.com/JeffreyBLewis/congressional-district-boundaries/issues/14).  Not sure how these survived de-duplication in the processing of the original congress-by-congress files, but I simply remove them here.
+
+## `Alaska_103_to_114.geojson`
+
+```{r}
+#| message: false
+library(tidyverse)
+library(sf)
+
+GEOJSON_FILE <- "../../GeoJson/Alaska_103_to_114.geojson"
+gdat <- st_read(GEOJSON_FILE)
+```
+
+There are indeed two shapes!
+
+```{r}
+glimpse(gdat)
+```
+
+They are identical!
+
+```{r}
+identical(gdat$geometry[1], gdat$geometry[2])
+```
+
+Writing a de-duplicated GEOJSON:
+
+```{r}
+unlink(GEOJSON_FILE) 
+distinct(gdat) |> 
+  glimpse() |>
+  st_write(GEOJSON_FILE, append=FALSE)
+```
+
+
+## `California_103_to_107.geojson`
+
+```{r}
+GEOJSON_FILE <- "../../GeoJson/California_103_to_107.geojson"
+gdat <- st_read(GEOJSON_FILE)
+```
+
+There are indeed two distinct CD 13 shapes!
+
+```{r}
+gdat |> 
+  count(district) |> 
+  filter(n > 1)
+```
+
+They are the same!
+
+```{r}
+dup <- gdat |> filter(district == 13) 
+all(st_equals(dup[1], dup[2], sparse = FALSE))
+```
+
+```{r}
+unlink(GEOJSON_FILE) 
+distinct(gdat) |> 
+  glimpse() |>
+  st_write(GEOJSON_FILE, append=FALSE)
+```
+
+
+## `Maryland_103_to_107.geojson`
+
+```{r}
+GEOJSON_FILE <- "../../GeoJson/Maryland_103_to_107.geojson"
+gdat <- st_read(GEOJSON_FILE)
+```
+
+There are indeed two distinct CD 5 shapes!
+
+```{r}
+gdat |> 
+  count(district) |> 
+  filter(n > 1)
+```
+
+They are the same!
+
+```{r}
+dup <- gdat |> filter(district == 5) 
+all(st_equals(dup[1], dup[2], sparse = FALSE))
+```
+
+```{r}
+unlink(GEOJSON_FILE) 
+distinct(gdat) |> 
+  glimpse() |>
+  st_write(GEOJSON_FILE, append=FALSE)
+```
+
+## `Massachusetts_103_to_107.geojson`
+
+```{r}
+GEOJSON_FILE <- "../../GeoJson/Massachusetts_103_to_107.geojson"
+gdat <- st_read(GEOJSON_FILE)
+```
+
+There are indeed two distinct CD 9 shapes!
+
+```{r}
+gdat |> 
+  count(district) |> 
+  filter(n > 1)
+```
+
+They are the same!
+
+```{r}
+dup <- gdat |> filter(district == 9) 
+all(st_equals(dup[1], dup[2], sparse = FALSE))
+```
+
+```{r}
+unlink(GEOJSON_FILE) 
+distinct(gdat) |> 
+  glimpse() |>
+  st_write(GEOJSON_FILE, append=FALSE)
+```
+
+## `New York_099_to_102.geojson`
+
+```{r}
+GEOJSON_FILE <- "../../GeoJson/New York_099_to_102.geojson"
+gdat <- st_read(GEOJSON_FILE)
+```
+
+There are indeed two distinct CD 29 shapes!
+
+```{r}
+gdat |> 
+  count(district) |> 
+  filter(n > 1)
+```
+
+They are the same!
+
+```{r}
+dup <- gdat |> filter(district == 19) 
+all(st_equals(dup[1], dup[2], sparse = FALSE))
+```
+
+```{r}
+unlink(GEOJSON_FILE) 
+distinct(gdat) |> 
+  glimpse() |>
+  st_write(GEOJSON_FILE, append=FALSE)
+```
+
+
+## `Washington_103_to_107.geojson`
+
+```{r}
+GEOJSON_FILE <- "../../GeoJson/Washington_103_to_107.geojson"
+gdat <- st_read(GEOJSON_FILE)
+```
+
+There are indeed two distinct CD 9 shapes!
+
+```{r}
+gdat |> 
+  count(district) |> 
+  filter(n > 1)
+```
+
+They are the same!
+
+```{r}
+dup <- gdat |> filter(district == 3) 
+all(st_equals(dup[1], dup[2], sparse = FALSE))
+```
+
+```{r}
+unlink(GEOJSON_FILE) 
+distinct(gdat) |> 
+  glimpse() |>
+  st_write(GEOJSON_FILE, append=FALSE)
+```
