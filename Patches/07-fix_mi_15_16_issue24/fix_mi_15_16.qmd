@@ -17,6 +17,7 @@ portion of the district."
 library(tidyverse)
 library(sf)
 library(tigris)
+library(readxl)
 options(tigris_use_cache = TRUE)
 sf_use_s2(FALSE)
 ```
@@ -30,19 +31,10 @@ d15 <- mi |> filter(district == 15)
 d16 <- mi |> filter(district == 16)
 ```
 
-The Census Bureau's own map of Wayne County for the 89th Congress (attached
-to the issue) shows District 16 as a compact area covering the city of
-Dearborn and the inner Downriver suburbs -- Melvindale, Allen Park, Lincoln
-Park, River Rouge, Ecorse, Southgate, and Wyandotte -- with District 15
-wrapping around it to the west, north, and south (Canton, Nankin, Garden
-City, Dearborn Heights, Inkster, Wayne, Romulus, Taylor, and the outer
-Downriver communities further south like Trenton, Woodhaven, and Rockwood).
-
 On file, `district == 16` is tiny (`{r} as.numeric(st_area(d16))` sq. m,
-vs. `{r} as.numeric(st_area(d15))` for `district == 15`) and its shape does
-not resemble Dearborn/Downriver at all. Comparing it to current Wayne
-County, MI civil boundaries (which for these long-incorporated cities are
-essentially unchanged since the 1960s) confirms what it actually is:
+vs. `{r} as.numeric(st_area(d15))` for `district == 15`). Comparing it to
+current Wayne County, MI civil boundaries (which for these long-incorporated
+cities are essentially unchanged since the 1960s) shows what it actually is:
 
 ```{r}
 wayne_cousub <- county_subdivisions(state = "MI", county = "Wayne", cb = TRUE, year = 2020) |>
@@ -57,44 +49,92 @@ Essentially all (>99.9%) of the on-file District 16 shape sits inside the
 City of Detroit -- specifically, its irregular southwestern ("Delray")
 panhandle that pokes down between Melvindale, Dearborn, and River Rouge
 along the Rouge River. That panhandle is geographically cut off from the
-rest of Detroit by the surrounding suburbs, so it is plausible it really
-was drawn into the surrounding 16th district. But the suburban cities that
-should make up the bulk of District 16 -- Dearborn, Melvindale, Allen Park,
-Lincoln Park, River Rouge, Ecorse, Southgate, and Wyandotte -- are missing
-from it entirely:
+rest of Detroit by the surrounding suburbs, so it plausibly really was
+drawn into the surrounding 16th district. But essentially none of the
+Downriver suburbs that should make up the bulk of District 16 are present.
+
+## Determining the correct boundary
+
+The Census Bureau's scanned map of Wayne County for the 89th Congress
+(attached to the issue) shows District 16's approximate outline, but hand
+tracing which side of a hand-drawn, 55-year-old scanned line a given city
+falls on is error-prone -- an initial pass at this patch misread the line
+around Melvindale/Allen Park/Lincoln Park from the scan alone and got it
+wrong. The same UCLA project that produced this repository's source data
+also published a per-state, per-era notes file documenting exactly which
+counties/townships/cities were assigned to each district, citing the
+actual 1964 Michigan apportionment law (Act 282) as its source. That's a
+much more reliable, unambiguous reference than reading a scan, so it's
+used here as ground truth:
 
 ```{r}
-d16_cities <- c("Dearborn", "Melvindale", "Allen Park", "Lincoln Park",
-                "River Rouge", "Ecorse", "Southgate", "Wyandotte")
+notes_url <- "https://cdmaps.polisci.ucla.edu/doc/89-92cc_Michigan_Notes.xlsx"
+notes_file <- tempfile(fileext = ".xlsx")
+download.file(notes_url, notes_file, quiet = TRUE, mode = "wb")
+
+raw <- read_excel(notes_file, sheet = "Sheet1", col_names = FALSE)
+notes <- raw |>
+  filter(row_number() > which(raw[[1]] == "State")) |>
+  set_names(c("state", "district", "county", "x4", "x5", "x6", "progress", "note")) |>
+  filter(district %in% c("15", "16"), county == "Wayne") |>
+  select(district, note)
+
+notes |> pull(note) |> walk(\(x) {cat(strwrap(x, width = 90), sep = "\n"); cat("\n\n")})
+```
+
+District 15's Wayne County territory is: townships of Canton, Dearborn,
+Huron, Nankin, Romulus, Sumpter, Taylor, Van Buren; cities of Allen Park,
+Belleville, Dearborn Heights, Garden City, Lincoln Park, Melvindale, Wayne.
+
+District 16's Wayne County territory is: townships of Brownstown and Grosse
+Ile; cities of Dearborn, Ecorse, Gibraltar, River Rouge, Riverview,
+Southgate, Trenton, Wyandotte; plus the part of the City of Detroit
+described as the panhandle already correctly on file (confirmed above).
+
+So Melvindale, Allen Park, and Lincoln Park -- despite sitting geographically
+between Dearborn and the rest of Downriver -- are District 15, forming a
+peninsula that pokes into what's otherwise District 16 territory. Woodhaven,
+Flat Rock, and Rockwood aren't named explicitly (they incorporated out of
+Brownstown Township in 1965-68, shortly after the 1964 law was written), but
+nothing in the notes or the map shows any district line cutting them off
+from the rest of the Downriver cluster, so they're treated as inheriting
+Brownstown Township's District 16 assignment.
+
+```{r}
+d16_places <- c("Dearborn", "Ecorse", "River Rouge", "Southgate", "Wyandotte",
+                "Riverview", "Trenton", "Gibraltar", "Woodhaven", "Flat Rock",
+                "Rockwood", "Brownstown", "Grosse Ile")
 target <- wayne_cousub |>
-  filter(NAME %in% d16_cities) |>
+  filter(NAME %in% d16_places) |>
   st_union() |>
   st_make_valid()
 
 tibble(
   district = c(15, 16),
   area_sqm = c(as.numeric(st_area(d15)), as.numeric(st_area(d16))),
-  frac_of_downriver_cities = c(
+  frac_of_target_cities = c(
     as.numeric(st_area(st_intersection(st_geometry(d15), target))) / as.numeric(st_area(target)),
     as.numeric(st_area(st_intersection(st_geometry(d16), target))) / as.numeric(st_area(target))
   )
 )
 ```
 
-95% of the Dearborn/Downriver cities that should be District 16 are instead
-part of District 15 on file. This matches the issue exactly.
+96% of the cities/townships that should be District 16 are instead part of
+District 15 on file, confirming the bug.
 
 Checking the neighboring era files (`Michigan_093_to_097.geojson`,
-`Michigan_098_to_102.geojson`, `Michigan_103_to_107.geojson`) shows the same
-cities are correctly ~82-86% within District 16 there, confirming the bug
-is isolated to `Michigan_089_to_092.geojson`.
+`Michigan_098_to_102.geojson`, `Michigan_103_to_107.geojson`) shows their
+`district == 15`/`16` boundaries were redrawn at each subsequent
+redistricting (Michigan's district lines here were not static), so they
+aren't used to infer the 89-92 boundary -- the notes file is the only
+source used for that.
 
 ## Fix
 
-Move the Dearborn/Downriver cities (clipped to the existing District
-15/16 combined area, so we don't take territory from neighboring districts
-1 or 17) from District 15 to District 16, keeping the existing (correct)
-Detroit panhandle piece as part of District 16 as well.
+Move the correct District 16 cities/townships (clipped to the existing
+District 15/16 combined area, so we don't take territory from neighboring
+districts 1 or 17) from District 15 to District 16, keeping the existing
+(correct) Detroit panhandle piece as part of District 16 as well.
 
 ```{r}
 region <- st_union(st_geometry(d15), st_geometry(d16)) |> st_make_valid()
@@ -117,17 +157,34 @@ as.numeric(st_area(new_d15)) + as.numeric(st_area(new_d16))
 as.numeric(st_area(st_intersection(new_d15, new_d16)))
 ```
 
-District 16 now covers essentially all of the Dearborn/Downriver cities
-called for by the Census map, and District 15 essentially none of them:
+District 16 now covers essentially all of its target cities/townships, and
+District 15 essentially none of them:
 
 ```{r}
 tibble(
   district = c(15, 16),
-  frac_of_downriver_cities = c(
+  frac_of_target_cities = c(
     as.numeric(st_area(st_intersection(st_geometry(new_d15), target))) / as.numeric(st_area(target)),
     as.numeric(st_area(st_intersection(st_geometry(new_d16), target))) / as.numeric(st_area(target))
   )
 )
+```
+
+And each individual city/township lands in the district the notes call for
+(cross-checking Melvindale, Allen Park, and Lincoln Park stayed in District
+15 rather than following their Downriver neighbors into District 16):
+
+```{r}
+check_places <- c("Melvindale", "Allen Park", "Lincoln Park", "Dearborn",
+                   "Ecorse", "Wyandotte", "Grosse Ile", "Rockwood")
+map_dfr(check_places, function(nm) {
+  cg <- wayne_cousub |> filter(NAME == nm) |> st_geometry() |> st_union()
+  tibble(
+    place = nm,
+    frac_in_d15 = as.numeric(st_area(st_intersection(cg, st_geometry(new_d15)))) / as.numeric(st_area(cg)),
+    frac_in_d16 = as.numeric(st_area(st_intersection(cg, st_geometry(new_d16)))) / as.numeric(st_area(cg))
+  )
+})
 ```
 
 ## Write out the corrected file
@@ -144,15 +201,16 @@ st_write(out, GEOJSON_FILE, append = FALSE)
 
 ## Visual validation against the Census map
 
-As a quick sanity check, overlay the corrected District 15/16 shapes directly
-on top of the Census Bureau's own scan of the 89th Congress Wayne County map
-(the one attached to the issue). The scan has no embedded coordinates, so it
-first has to be georeferenced: three small, distinctively-shaped
-municipalities that are easy to pick out by eye in the scan -- Plymouth
-city, Belleville city, and the Highland Park enclave -- and whose real-world
-boundaries have not meaningfully changed since the 1960s, are used as
-control points (their pixel bounding boxes in the scan, matched to their
-`tigris` bounding boxes) to fit a simple pixel -> lon/lat transform.
+As a quick sanity check, overlay the corrected District 15/16 shapes
+directly on top of the Census Bureau's own scan of the 89th Congress Wayne
+County map (the one attached to the issue). The scan has no embedded
+coordinates, so it first has to be georeferenced: three small,
+distinctively-shaped municipalities that are easy to pick out by eye in the
+scan -- Plymouth city, Belleville city, and the Highland Park enclave -- and
+whose real-world boundaries have not meaningfully changed since the 1960s,
+are used as control points (their pixel bounding boxes in the scan, matched
+to their `tigris` bounding boxes) to fit a simple pixel -> lon/lat
+transform.
 
 ```{r}
 #| message: false
@@ -206,6 +264,21 @@ ggplot() +
   theme_minimal()
 ```
 
-The corrected District 16 (blue) now traces the Census map's compact
-Dearborn/Downriver outline, and District 15 (red) wraps around it exactly
-as shown on the map.
+And zoomed in on Allen Park/Melvindale/Lincoln Park, to check that peninsula
+specifically against the map:
+
+```{r}
+#| fig-width: 8
+#| fig-height: 8
+ggplot() +
+  annotation_raster(img, xmin, xmax, ymin, ymax) +
+  geom_sf(data = new_d15, fill = NA, color = "red", linewidth = 1.2) +
+  geom_sf(data = new_d16, fill = NA, color = "blue", linewidth = 1.2) +
+  coord_sf(xlim = c(-83.22, -83.12), ylim = c(42.25, 42.35), expand = FALSE) +
+  labs(title = "Zoom: Allen Park / Melvindale / Lincoln Park / Ecorse") +
+  theme_minimal()
+```
+
+The corrected District 16 (blue) traces the Census map's Downriver outline,
+including the full extent south to Rockwood/Flat Rock, while District 15
+(red) keeps its Allen Park/Melvindale/Lincoln Park peninsula intact.
