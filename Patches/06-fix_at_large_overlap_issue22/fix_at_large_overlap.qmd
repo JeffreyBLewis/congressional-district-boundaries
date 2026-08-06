@@ -1,0 +1,198 @@
+---
+title: "Fix At-Large District Overlap From Issue #22"
+format: html
+editor: source
+---
+
+## Overview
+
+@cgrabois reported in [Issue #22](https://github.com/JeffreyBLewis/congressional-district-boundaries/issues/22)
+that in several shapefiles, "District 1" appears to equal the full state
+boundary, almost entirely overlapping "District 2", for South Dakota
+(93rd-97th Congress), Montana (93rd-98th and 99th-102nd Congress), and (per a
+follow-up comment) Montana, North Dakota, and South Dakota in the 92nd
+Congress.
+
+Investigating, the individual `district == 1` and `district == 2` shapes in
+the relevant per-era GeoJSON files (e.g. `South Dakota_093_to_097.geojson`)
+are already correct and non-overlapping: their areas sum to the full state
+area with essentially zero intersection. The actual bug is that each of these
+three states also has a `district == 0` ("at-large") shape -- a single
+polygon equal to the entire state, used for congresses when the state had
+only one, statewide district:
+
+  - `South Dakota_051_to_119.geojson`
+  - `Montana_051_to_117.geojson`
+  - `North Dakota_051_to_119.geojson`
+
+Each of these files has `startcong`/`endcong` values that span the state's
+*entire* congressional history, including congresses when the state actually
+had two (or three) separate districts. So for, say, the 93rd Congress, South
+Dakota has three shapes on file: the correct District 1, the correct District
+2, *and* a spurious full-state "district 0" shape that duplicates/overlaps
+both of them. Downstream code that combines these files by congress (like
+this repo's own `_targets.R` pipeline, or the shapefiles the reporter built)
+ends up with a full-state polygon sitting on top of the real districts --
+which is what produces the "District 1 = whole state" appearance.
+
+This is a metadata bug, not a geometry bug: the at-large polygon itself is
+correct (it really is the full state, for the congresses when the state
+really was at-large). The fix is to split each `district == 0` row's
+congress range so it no longer overlaps the congresses covered by the
+state's other (multi-district) files, re-using the same at-large geometry
+for each split range.
+
+```{r}
+#| message: false
+library(tidyverse)
+library(sf)
+sf_use_s2(FALSE)
+```
+
+## Determine the correct at-large ranges
+
+For each state, the multi-district files already on file tell us exactly
+which congresses were *not* at-large. The at-large row should cover
+everything else within its original range.
+
+```{r}
+GEOJSON_DIR <- "../../GeoJson"
+
+district_files <- function(statename) {
+  list.files(GEOJSON_DIR,
+             pattern = paste0("^", statename, "_[0-9]+_to_[0-9]+\\.geojson$"),
+             full.names = TRUE)
+}
+
+congress_coverage <- function(statename) {
+  map_dfr(district_files(statename), function(f) {
+    st_read(f, quiet = TRUE) |>
+      st_drop_geometry() |>
+      distinct(district, startcong, endcong) |>
+      mutate(file = basename(f))
+  }) |>
+    arrange(startcong)
+}
+
+congress_coverage("South Dakota")
+congress_coverage("Montana")
+congress_coverage("North Dakota")
+```
+
+The `district == 0` (at-large) row's original range, and the non-at-large
+ranges it needs to avoid, for each state:
+
+  - **South Dakota**: at-large file covers 51-119; districted 63-97 (no gaps).
+    Corrected at-large ranges: **51-62** and **98-119**.
+  - **Montana**: at-large file covers 51-117; districted 66-102 (no gaps).
+    Corrected at-large ranges: **51-65** and **103-117**.
+  - **North Dakota**: at-large file covers 51-119; districted 63-72 and
+    88-92 (a real gap 73-87, when ND elected two members at-large without
+    district lines -- consistent with the "Two general ticket
+    representatives" / "One representative" notes already in the data).
+    Corrected at-large ranges: **51-62**, **73-87**, and **93-119**.
+
+## Splitting function
+
+```{r}
+split_at_large <- function(GEOJSON_FILE, ranges, statefp) {
+  gdat <- st_read(GEOJSON_FILE, quiet = TRUE)
+  stopifnot(nrow(gdat) == 1, gdat$district == 0)
+
+  split_rows <- map(ranges, function(r) {
+    row <- gdat
+    row$startcong <- r[1]
+    row$endcong <- r[2]
+    row$id <- sprintf("%03d%03d%03d%03d", as.integer(statefp), r[1], r[2], 0)
+    row
+  })
+
+  out <- bind_rows(split_rows)
+  unlink(GEOJSON_FILE)
+  st_write(out, GEOJSON_FILE, append = FALSE)
+  out
+}
+```
+
+## South Dakota
+
+```{r}
+sd_out <- split_at_large(
+  file.path(GEOJSON_DIR, "South Dakota_051_to_119.geojson"),
+  list(c(51, 62), c(98, 119)),
+  statefp = 46
+)
+st_drop_geometry(sd_out)[, c("statename", "district", "startcong", "endcong", "id")]
+```
+
+## Montana
+
+```{r}
+mt_out <- split_at_large(
+  file.path(GEOJSON_DIR, "Montana_051_to_117.geojson"),
+  list(c(51, 65), c(103, 117)),
+  statefp = 30
+)
+st_drop_geometry(mt_out)[, c("statename", "district", "startcong", "endcong", "id")]
+```
+
+## North Dakota
+
+```{r}
+nd_out <- split_at_large(
+  file.path(GEOJSON_DIR, "North Dakota_051_to_119.geojson"),
+  list(c(51, 62), c(73, 87), c(93, 119)),
+  statefp = 38
+)
+st_drop_geometry(nd_out)[, c("statename", "district", "startcong", "endcong", "id")]
+```
+
+## Validation
+
+For every congress from 51 to 119, and each of the three states, confirm
+that no more than one shape from a given file-family now claims that
+congress in a way that overlaps another shape for the same congress: i.e.
+that the at-large shape and the districted shapes never both claim the
+same congress.
+
+```{r}
+validate_state <- function(statename) {
+  cov <- congress_coverage(statename)
+  map_dfr(51:119, function(cng) {
+    matches <- cov |> filter(startcong <= cng, endcong >= cng)
+    tibble(congress = cng, n_shapes = nrow(matches),
+           districts = paste(sort(matches$district), collapse = ","))
+  })
+}
+
+sd_check <- validate_state("South Dakota")
+mt_check <- validate_state("Montana")
+nd_check <- validate_state("North Dakota")
+
+# Any congress where an at-large (0) shape coexists with districted (1/2/3)
+# shapes would indicate the overlap bug is still present.
+bind_rows(
+  sd_check |> mutate(state = "South Dakota"),
+  mt_check |> mutate(state = "Montana"),
+  nd_check |> mutate(state = "North Dakota")
+) |>
+  filter(str_detect(districts, "0"), str_detect(districts, "1|2|3"))
+```
+
+The empty result above confirms that, for every congress 51-119, the
+at-large shape and the districted shapes no longer overlap for any of the
+three states.
+
+Finally, spot-check the specific congresses called out in the issue
+(South Dakota/Montana/North Dakota 92nd; South Dakota 93rd-97th; Montana
+93rd-98th and 99th-102nd) to confirm only the correct districted shapes
+(no at-large shape) are present:
+
+```{r}
+bind_rows(
+  sd_check |> mutate(state = "South Dakota"),
+  mt_check |> mutate(state = "Montana"),
+  nd_check |> mutate(state = "North Dakota")
+) |>
+  filter(congress %in% c(92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102))
+```
