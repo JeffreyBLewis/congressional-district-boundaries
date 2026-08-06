@@ -1,0 +1,143 @@
+---
+title: "Fix Michigan CD 15/16 Boundary From Issue #24"
+format: html
+editor: source
+---
+
+## Overview
+
+Benjamin Dasilva reported in [Issue #24](https://github.com/JeffreyBLewis/congressional-district-boundaries/issues/24)
+that in `Michigan_089_to_092.geojson` (89th-92nd Congress, 1965-1972), the
+suburban ("Downriver") portion of District 16 is incorrectly included in
+District 15, and that the on-file District 16 shape only covers "the Detroit
+portion of the district."
+
+```{r}
+#| message: false
+library(tidyverse)
+library(sf)
+library(tigris)
+options(tigris_use_cache = TRUE)
+sf_use_s2(FALSE)
+```
+
+## Confirming the bug
+
+```{r}
+GEOJSON_FILE <- "../../GeoJson/Michigan_089_to_092.geojson"
+mi <- st_read(GEOJSON_FILE, quiet = TRUE)
+d15 <- mi |> filter(district == 15)
+d16 <- mi |> filter(district == 16)
+```
+
+The Census Bureau's own map of Wayne County for the 89th Congress (attached
+to the issue) shows District 16 as a compact area covering the city of
+Dearborn and the inner Downriver suburbs -- Melvindale, Allen Park, Lincoln
+Park, River Rouge, Ecorse, Southgate, and Wyandotte -- with District 15
+wrapping around it to the west, north, and south (Canton, Nankin, Garden
+City, Dearborn Heights, Inkster, Wayne, Romulus, Taylor, and the outer
+Downriver communities further south like Trenton, Woodhaven, and Rockwood).
+
+On file, `district == 16` is tiny (`{r} as.numeric(st_area(d16))` sq. m,
+vs. `{r} as.numeric(st_area(d15))` for `district == 15`) and its shape does
+not resemble Dearborn/Downriver at all. Comparing it to current Wayne
+County, MI civil boundaries (which for these long-incorporated cities are
+essentially unchanged since the 1960s) confirms what it actually is:
+
+```{r}
+wayne_cousub <- county_subdivisions(state = "MI", county = "Wayne", cb = TRUE, year = 2020) |>
+  st_transform(st_crs(mi))
+
+detroit <- wayne_cousub |> filter(NAME == "Detroit")
+as.numeric(st_area(st_intersection(st_geometry(d16), st_geometry(detroit)))) /
+  as.numeric(st_area(d16))
+```
+
+Essentially all (>99.9%) of the on-file District 16 shape sits inside the
+City of Detroit -- specifically, its irregular southwestern ("Delray")
+panhandle that pokes down between Melvindale, Dearborn, and River Rouge
+along the Rouge River. That panhandle is geographically cut off from the
+rest of Detroit by the surrounding suburbs, so it is plausible it really
+was drawn into the surrounding 16th district. But the suburban cities that
+should make up the bulk of District 16 -- Dearborn, Melvindale, Allen Park,
+Lincoln Park, River Rouge, Ecorse, Southgate, and Wyandotte -- are missing
+from it entirely:
+
+```{r}
+d16_cities <- c("Dearborn", "Melvindale", "Allen Park", "Lincoln Park",
+                "River Rouge", "Ecorse", "Southgate", "Wyandotte")
+target <- wayne_cousub |>
+  filter(NAME %in% d16_cities) |>
+  st_union() |>
+  st_make_valid()
+
+tibble(
+  district = c(15, 16),
+  area_sqm = c(as.numeric(st_area(d15)), as.numeric(st_area(d16))),
+  frac_of_downriver_cities = c(
+    as.numeric(st_area(st_intersection(st_geometry(d15), target))) / as.numeric(st_area(target)),
+    as.numeric(st_area(st_intersection(st_geometry(d16), target))) / as.numeric(st_area(target))
+  )
+)
+```
+
+95% of the Dearborn/Downriver cities that should be District 16 are instead
+part of District 15 on file. This matches the issue exactly.
+
+Checking the neighboring era files (`Michigan_093_to_097.geojson`,
+`Michigan_098_to_102.geojson`, `Michigan_103_to_107.geojson`) shows the same
+cities are correctly ~82-86% within District 16 there, confirming the bug
+is isolated to `Michigan_089_to_092.geojson`.
+
+## Fix
+
+Move the Dearborn/Downriver cities (clipped to the existing District
+15/16 combined area, so we don't take territory from neighboring districts
+1 or 17) from District 15 to District 16, keeping the existing (correct)
+Detroit panhandle piece as part of District 16 as well.
+
+```{r}
+region <- st_union(st_geometry(d15), st_geometry(d16)) |> st_make_valid()
+target_clip <- st_intersection(target, region) |> st_make_valid()
+
+new_d16_geom <- st_union(st_geometry(d16), target_clip) |> st_make_valid()
+new_d15_geom <- st_difference(st_geometry(d15), target_clip) |> st_make_valid()
+
+new_d15 <- st_set_geometry(d15, st_sfc(new_d15_geom, crs = st_crs(mi)))
+new_d16 <- st_set_geometry(d16, st_sfc(new_d16_geom, crs = st_crs(mi)))
+```
+
+## Validation
+
+Area is conserved and the two new shapes don't overlap:
+
+```{r}
+as.numeric(st_area(region))
+as.numeric(st_area(new_d15)) + as.numeric(st_area(new_d16))
+as.numeric(st_area(st_intersection(new_d15, new_d16)))
+```
+
+District 16 now covers essentially all of the Dearborn/Downriver cities
+called for by the Census map, and District 15 essentially none of them:
+
+```{r}
+tibble(
+  district = c(15, 16),
+  frac_of_downriver_cities = c(
+    as.numeric(st_area(st_intersection(st_geometry(new_d15), target))) / as.numeric(st_area(target)),
+    as.numeric(st_area(st_intersection(st_geometry(new_d16), target))) / as.numeric(st_area(target))
+  )
+)
+```
+
+## Write out the corrected file
+
+```{r}
+out <- mi |>
+  filter(!(district %in% c(15, 16))) |>
+  bind_rows(new_d15, new_d16) |>
+  arrange(district)
+
+unlink(GEOJSON_FILE)
+st_write(out, GEOJSON_FILE, append = FALSE)
+```
