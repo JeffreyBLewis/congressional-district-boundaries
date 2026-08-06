@@ -137,29 +137,34 @@ districts 1 or 17) from District 15 to District 16, keeping the existing
 (correct) Detroit panhandle piece as part of District 16 as well.
 
 Doing this with a naive `st_intersection`/`st_difference` leaves visible
-artifacts, for two separate reasons found while checking the result against
-the Census map:
+artifacts, for several separate reasons found by actually checking the
+result against the Census map and against real water/land data (numeric
+checks like area conservation and per-city coverage all looked fine and
+still missed every one of these):
 
   - `wayne_cousub`'s coastline (modern TIGER data) doesn't exactly line up
     with the 1970 Census shapefile's coastline along the Detroit River, and
-    cutting along it directly leaves a scatter of sliver artifacts on the
-    shore.
+    cutting along it directly leaves a scatter of sliver fragments on the
+    shore -- some are thin enough to look like stray line segments once
+    written out, others are small chunks of open water masquerading as
+    land.
   - The original (pre-fix, untouched) `district == 15` shape already
     contains a spurious ~2km-long, ~30m-wide spike near Ecorse -- a
     pre-existing digitizing glitch in the 1970 source data, unrelated to
     this bug, but this patch is already rebuilding this exact area so it's
     addressed here too rather than left in place.
+  - A handful of small fragments end up geographically disconnected from
+    their own district's mainland while directly touching the other
+    district -- an orphan of the cut, not real geography.
 
-Both are fixed the same way: work in a projected CRS (Michigan State Plane
-South, so distances are in meters and the cleanup thresholds below mean
-what they say), and after each boundary operation, keep only real polygon
-area and discard anything under a small size threshold -- both stray
-degenerate slivers and, in the one case above, the pre-existing spike. The
-result is transformed back to the file's own CRS for writing; the
-projection is just a computational tool for this step, not something that
-ends up in the data.
+Fixed in a projected CRS (Michigan State Plane South, so distances are in
+meters and the cleanup thresholds below mean what they say); the result is
+transformed back to the file's own CRS for writing -- the projection is
+just a computational tool for this step, not something that ends up in the
+data.
 
 ```{r}
+#| message: false
 MI_SOUTH <- 6498 # NAD83(2011) / Michigan South, meters
 orig_crs <- st_crs(mi)
 
@@ -182,32 +187,82 @@ target_clip <- st_intersection(target_snapped, region) |> st_make_valid()
 
 new_d16_geom <- st_union(d16_p, target_clip) |> st_make_valid()
 new_d15_geom <- st_difference(d15_p, target_clip) |> st_make_valid()
+```
 
-# Keep only real polygon area: st_intersection/st_difference between two
-# slightly-mismatched coastlines can return a GEOMETRYCOLLECTION mixing in
-# degenerate LINESTRING/POINT slivers, and even the polygon parts can
-# include small coastline-mismatch fragments -- both would otherwise show
-# up as stray marks when plotted. 25,000 sqm sits well below every real
-# named place here (the smallest true river island in the final result
-# runs ~30,000 sqm) and well above the mismatch slivers (which top out
-# around 20,000 sqm and are much less circular -- true islands are
-# comparatively round, slivers are thin ribbons).
-clean_polys <- function(g, crs, min_area_sqm = 25000) {
-  g <- st_sfc(g, crs = crs) |> st_collection_extract("POLYGON") |> st_make_valid()
-  parts <- st_cast(g, "MULTIPOLYGON", warn = FALSE) |> st_cast("POLYGON", warn = FALSE)
+This dataset never assigns open water to any district (checked earlier
+against District 13's Detroit shoreline), so real major water bodies --
+the Detroit River and Lake Erie, specifically, not every farm pond or
+marina slip in the raw TIGER hydrography layer, which would instead shred
+real islands into unrealistic hyper-detail this 1970s-generalized dataset
+never had -- are used as a second, independent signal for telling real land
+from a mismatch sliver, on top of shape compactness (`4*pi*area/perimeter^2`;
+a real (if small) river island runs ~0.1-0.7, a thin sliver runs under
+~0.05) and a small absolute-size floor:
+
+```{r}
+#| message: false
+water <- area_water("MI", "Wayne", year = 2020) |>
+  st_transform(MI_SOUTH) |>
+  filter(as.numeric(st_area(geometry)) >= 100000) |>
+  st_geometry() |>
+  st_union() |>
+  st_make_valid()
+
+# Split into whole connected parts and keep only ones that look like real
+# land: big enough, not majority open water, not a thin ribbon. Filtering
+# whole parts (rather than subtracting water from the geometry) avoids
+# fragmenting real islands along every narrow channel between them.
+filter_parts <- function(g, crs, min_area_sqm = 2500, max_water_frac = 0.3, min_compactness = 0.08) {
+  gc <- st_sfc(g, crs = crs) |> st_collection_extract("POLYGON") |> st_make_valid()
+  parts <- st_cast(gc, "MULTIPOLYGON", warn = FALSE) |> st_cast("POLYGON", warn = FALSE)
+  areas <- as.numeric(st_area(parts))
+  perims <- as.numeric(st_length(st_cast(parts, "MULTILINESTRING", warn = FALSE)))
+  compactness <- 4 * pi * areas / perims^2
+  water_frac <- sapply(seq_along(parts), function(i) {
+    wa <- tryCatch(sum(as.numeric(st_area(st_intersection(parts[i], water)))), error = function(e) 0)
+    if (length(wa) == 0) wa <- 0
+    wa / areas[i]
+  })
+  parts[areas >= min_area_sqm & water_frac <= max_water_frac & compactness >= min_compactness]
+}
+
+d15_parts <- filter_parts(new_d15_geom, MI_SOUTH)
+d16_parts <- filter_parts(new_d16_geom, MI_SOUTH)
+```
+
+District 15's Wayne County territory is one contiguous block of townships
+per the notes (District 16 is the one with a naturally island-dotted river
+coastline), so any surviving District 15 fragment that doesn't touch
+District 15's own mainland -- but does touch District 16 -- almost
+certainly belongs there instead of being an orphan of the cut:
+
+```{r}
+d15_areas <- as.numeric(st_area(st_sfc(d15_parts, crs = MI_SOUTH)))
+main_d15 <- d15_parts[which.max(d15_areas)]
+touches_main <- st_touches(st_sfc(d15_parts, crs = MI_SOUTH), st_sfc(main_d15, crs = MI_SOUTH), sparse = FALSE)[, 1]
+orphans <- d15_parts[!touches_main]
+if (length(orphans) > 0) {
+  touches_d16 <- st_touches(st_sfc(orphans, crs = MI_SOUTH), st_union(st_sfc(d16_parts, crs = MI_SOUTH)), sparse = FALSE)[, 1]
+  d16_parts <- c(d16_parts, orphans[touches_d16])
+  d15_parts <- c(d15_parts[touches_main], orphans[!touches_d16])
+}
+
+new_d15_misp <- st_sfc(st_union(st_sfc(d15_parts, crs = MI_SOUTH)) |> st_make_valid(), crs = MI_SOUTH)
+new_d16_misp <- st_sfc(st_union(st_sfc(d16_parts, crs = MI_SOUTH)) |> st_make_valid(), crs = MI_SOUTH)
+
+# Reprojection itself can reintroduce degenerate slivers, so repeat a
+# lightweight version of the same polygon-only cleanup once more after
+# transforming back to the file's own CRS (a 1 sqm floor here -- this pass
+# is only mopping up reprojection noise, not real coastline mismatch).
+clean_final <- function(g, crs, min_area_sqm = 1) {
+  gc <- st_sfc(g, crs = crs) |> st_collection_extract("POLYGON") |> st_make_valid()
+  parts <- st_cast(gc, "MULTIPOLYGON", warn = FALSE) |> st_cast("POLYGON", warn = FALSE)
   parts <- parts[as.numeric(st_area(parts)) >= min_area_sqm]
   st_sfc(st_union(parts) |> st_make_valid(), crs = crs)
 }
 
-new_d15 <- st_set_geometry(d15, st_transform(clean_polys(new_d15_geom, MI_SOUTH), orig_crs))
-new_d16 <- st_set_geometry(d16, st_transform(clean_polys(new_d16_geom, MI_SOUTH), orig_crs))
-
-# Reprojection itself can reintroduce degenerate slivers, so repeat the
-# same polygon-only, small-fragment cleanup once more after transforming
-# back (a 1 sqm floor here -- this pass is only mopping up reprojection
-# noise, not real coastline mismatch).
-st_geometry(new_d15) <- clean_polys(st_geometry(new_d15)[[1]], orig_crs, min_area_sqm = 1)
-st_geometry(new_d16) <- clean_polys(st_geometry(new_d16)[[1]], orig_crs, min_area_sqm = 1)
+new_d15 <- st_set_geometry(d15, clean_final(st_transform(new_d15_misp, orig_crs)[[1]], orig_crs))
+new_d16 <- st_set_geometry(d16, clean_final(st_transform(new_d16_misp, orig_crs)[[1]], orig_crs))
 ```
 
 ## Validation
@@ -221,6 +276,20 @@ all(st_is_valid(new_d15), st_is_valid(new_d16))
 as.numeric(st_area(region))
 as.numeric(st_area(new_d15)) + as.numeric(st_area(new_d16))
 as.numeric(st_area(st_intersection(new_d15, new_d16)))
+```
+
+District 15 is a single contiguous mainland (as its notes-listed townships
+should be), and District 16's remaining separate parts are all real,
+reasonably-compact land (its natural river islands) rather than mismatch
+debris:
+
+```{r}
+d15_parts_final <- st_cast(st_geometry(new_d15), "MULTIPOLYGON", warn = FALSE)[[1]] |>
+  st_sfc(crs = orig_crs) |> st_cast("POLYGON", warn = FALSE)
+d16_parts_final <- st_cast(st_geometry(new_d16), "MULTIPOLYGON", warn = FALSE)[[1]] |>
+  st_sfc(crs = orig_crs) |> st_cast("POLYGON", warn = FALSE)
+length(d15_parts_final)
+length(d16_parts_final)
 ```
 
 District 16 now covers essentially all of its target cities/townships, and
