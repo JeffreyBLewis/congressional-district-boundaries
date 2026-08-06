@@ -141,3 +141,71 @@ out <- mi |>
 unlink(GEOJSON_FILE)
 st_write(out, GEOJSON_FILE, append = FALSE)
 ```
+
+## Visual validation against the Census map
+
+As a quick sanity check, overlay the corrected District 15/16 shapes directly
+on top of the Census Bureau's own scan of the 89th Congress Wayne County map
+(the one attached to the issue). The scan has no embedded coordinates, so it
+first has to be georeferenced: three small, distinctively-shaped
+municipalities that are easy to pick out by eye in the scan -- Plymouth
+city, Belleville city, and the Highland Park enclave -- and whose real-world
+boundaries have not meaningfully changed since the 1960s, are used as
+control points (their pixel bounding boxes in the scan, matched to their
+`tigris` bounding boxes) to fit a simple pixel -> lon/lat transform.
+
+```{r}
+#| message: false
+map_url <- "https://github.com/user-attachments/assets/a558df0c-39b7-4198-ab3b-647be0f32307"
+map_file <- tempfile(fileext = ".png")
+download.file(map_url, map_file, quiet = TRUE, mode = "wb")
+
+img <- png::readPNG(map_file)
+img_h <- dim(img)[1]
+img_w <- dim(img)[2]
+
+# Control points: pixel bounding-box corners (col, row) of Plymouth city,
+# Belleville city, and the Highland Park enclave, read off the scan, matched
+# to each city's real (NW, SE) bounding-box corner from `wayne_cousub`
+# (confirmed via st_bbox() on each city, filtered to NAMELSAD == "... city"
+# to avoid the same-named surrounding township).
+gcp <- tibble(
+  place = c("Plymouth NW", "Plymouth SE", "Belleville NW", "Belleville SE",
+            "Highland Park NW", "Highland Park SE"),
+  px    = c(208, 248, 190, 222, 657, 726),
+  py    = c(191, 228, 467, 502, 140, 190),
+  lon   = c(-83.48687, -83.44552, -83.49901, -83.47237, -83.12193, -83.07377),
+  lat   = c(42.38445, 42.35850, 42.21386, 42.19006, 42.41816, 42.38808)
+)
+
+lon_fit <- lm(lon ~ px, data = gcp)
+lat_fit <- lm(lat ~ py, data = gcp)
+
+max(abs(residuals(lon_fit)))
+max(abs(residuals(lat_fit)))
+
+xmin <- predict(lon_fit, tibble(px = 0))
+xmax <- predict(lon_fit, tibble(px = img_w))
+ymax <- predict(lat_fit, tibble(py = 0))
+ymin <- predict(lat_fit, tibble(py = img_h))
+```
+
+Residuals are well under 0.01 degrees (a few hundred meters) at county
+scale, plenty precise for a visual check. Now plot the corrected shapes on
+top of the georeferenced scan:
+
+```{r}
+#| fig-width: 9
+#| fig-height: 9
+ggplot() +
+  annotation_raster(img, xmin, xmax, ymin, ymax) +
+  geom_sf(data = new_d15, fill = NA, color = "red", linewidth = 1) +
+  geom_sf(data = new_d16, fill = NA, color = "blue", linewidth = 1) +
+  coord_sf(xlim = c(xmin, xmax), ylim = c(ymin, ymax), expand = FALSE) +
+  labs(title = "Corrected District 15 (red) / District 16 (blue) vs. Census map") +
+  theme_minimal()
+```
+
+The corrected District 16 (blue) now traces the Census map's compact
+Dearborn/Downriver outline, and District 15 (red) wraps around it exactly
+as shown on the map.
