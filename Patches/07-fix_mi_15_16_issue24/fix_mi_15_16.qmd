@@ -29,6 +29,24 @@ GEOJSON_FILE <- "../../GeoJson/Michigan_089_to_092.geojson"
 mi <- st_read(GEOJSON_FILE, quiet = TRUE)
 d15 <- mi |> filter(district == 15)
 d16 <- mi |> filter(district == 16)
+
+# The `Fix` section below rewrites GEOJSON_FILE in place and assumes it's
+# starting from the original, buggy shapes (single-part D16, just the
+# Delray panhandle). Once this patch has been applied once, GEOJSON_FILE
+# on disk *is* the fixed output, and re-rendering against its own prior
+# output breaks partway through. Detect that (fixed D16 has multiple
+# parts; the original never did) and fall back to the pre-patch version on
+# `master` -- this branch hasn't merged yet, so `master` is still the
+# correct pristine baseline -- so this doc stays safely re-runnable while
+# the fix (including the alignment tuning below) is still being iterated
+# on.
+if (length(st_cast(st_geometry(d16), "POLYGON", warn = FALSE)) > 1) {
+  orig_file <- tempfile(fileext = ".geojson")
+  writeLines(system2("git", c("show", "master:GeoJson/Michigan_089_to_092.geojson"), stdout = TRUE), orig_file)
+  mi <- st_read(orig_file, quiet = TRUE)
+  d15 <- mi |> filter(district == 15)
+  d16 <- mi |> filter(district == 16)
+}
 ```
 
 On file, `district == 16` is tiny (`{r} as.numeric(st_area(d16))` sq. m,
@@ -443,8 +461,64 @@ ymin <- predict(y_fit, tibble(py = img_h))
 ```
 
 Residuals are well under 500m at county scale, plenty precise for a visual
-check. Now plot the corrected shapes (reprojected to the same CRS) on top
-of the georeferenced scan:
+check.
+
+### Manual alignment tuning
+
+`annotation_raster` can only place the scan as an axis-aligned box, so the
+fit above -- independent per-axis regressions, `X ~ px` and `Y ~ py` -- has
+no way to express any rotation between the scan and true north, and a
+55-year-old paper map scan can easily be a degree or two off from square.
+The helpers below apply an extra rotation/dilation/shift to the *displayed
+scan only*, on top of the control-point fit, so different values can be
+tried by eye. None of this touches the `Fix` section above or the
+coordinates written to the GeoJSON file -- it only affects how the scan is
+drawn for this sanity-check figure.
+
+`rotation_deg` is degrees counterclockwise, applied first, about the scan's
+own center, in the scan's own (square) pixel space; `scale_x`/`scale_y`
+then dilate the (already-rotated) scan about that same center -- separately,
+since a scanned sheet can easily have slightly different N-S vs. E-W scale
+(paper stretch, an off-axis scanner bed) -- `> 1` grows that axis; `shift_x`
+/`shift_y` are in map meters (Michigan State Plane South), applied last.
+Note that non-uniform `scale_x`/`scale_y` combined with a nonzero
+`rotation_deg` isn't a pure rotation any more (it shears slightly), but for
+the small angles/ratios relevant here that's not visually significant:
+
+```{r}
+rotated_raster_grob <- function(img, angle_deg) {
+  grid::grobTree(grid::rasterGrob(img, vp = grid::viewport(angle = angle_deg), interpolate = TRUE))
+}
+
+adjusted_bbox <- function(scale_x = 1, scale_y = 1, shift_x = 0, shift_y = 0) {
+  cx <- (xmin + xmax) / 2
+  cy <- (ymin + ymax) / 2
+  list(
+    xmin = cx + (xmin - cx) * scale_x + shift_x,
+    xmax = cx + (xmax - cx) * scale_x + shift_x,
+    ymin = cy + (ymin - cy) * scale_y + shift_y,
+    ymax = cy + (ymax - cy) * scale_y + shift_y
+  )
+}
+
+render_overlay <- function(rotation_deg = 0, scale_x = 1, scale_y = 1, shift_x = 0, shift_y = 0,
+                            xlim = c(xmin, xmax), ylim = c(ymin, ymax), title = "") {
+  bb <- adjusted_bbox(scale_x, scale_y, shift_x, shift_y)
+  ggplot() +
+    annotation_custom(rotated_raster_grob(img, rotation_deg), bb$xmin, bb$xmax, bb$ymin, bb$ymax) +
+    geom_sf(data = new_d15_p, fill = NA, color = "red", linewidth = 1) +
+    geom_sf(data = new_d16_p, fill = NA, color = "blue", linewidth = 1) +
+    coord_sf(crs = MI_SOUTH, xlim = xlim, ylim = ylim, expand = FALSE) +
+    labs(title = title) +
+    theme_minimal()
+}
+```
+
+Now plot the corrected shapes (reprojected to the same CRS) on top of the
+georeferenced scan. Edit `ROTATION_DEG`/`SCALE_X`/`SCALE_Y`/`SHIFT_X`/
+`SHIFT_Y` below and re-render to try a different alignment --
+`0`/`1`/`1`/`0`/`0` reproduces the plain control-point fit with no
+adjustment, matching the figure used for validation above:
 
 ```{r}
 #| fig-width: 9
@@ -452,17 +526,19 @@ of the georeferenced scan:
 new_d15_p <- st_transform(new_d15, MI_SOUTH)
 new_d16_p <- st_transform(new_d16, MI_SOUTH)
 
-ggplot() +
-  annotation_raster(img, xmin, xmax, ymin, ymax) +
-  geom_sf(data = new_d15_p, fill = NA, color = "red", linewidth = 1) +
-  geom_sf(data = new_d16_p, fill = NA, color = "blue", linewidth = 1) +
-  coord_sf(crs = MI_SOUTH, xlim = c(xmin, xmax), ylim = c(ymin, ymax), expand = FALSE) +
-  labs(title = "Corrected District 15 (red) / District 16 (blue) vs. Census map") +
-  theme_minimal()
+ROTATION_DEG <- 2   # degrees counterclockwise
+SCALE_X <- 1.06        # dilation about the scan's own center, east-west
+SCALE_Y <- 0.96        # dilation about the scan's own center, north-south
+SHIFT_X <- 700       # meters, Michigan State Plane South
+SHIFT_Y <- 1300        # meters
+
+render_overlay(ROTATION_DEG, SCALE_X, SCALE_Y, SHIFT_X, SHIFT_Y,
+               title = "Corrected District 15 (red) / District 16 (blue) vs. Census map")
 ```
 
 And zoomed in on Allen Park/Melvindale/Lincoln Park, to check that peninsula
-specifically against the map:
+specifically against the map (using the same `ROTATION_DEG`/`SCALE_X`/
+`SCALE_Y`/`SHIFT_X`/`SHIFT_Y` set above):
 
 ```{r}
 #| fig-width: 8
@@ -472,13 +548,9 @@ zoom_bb <- st_bbox(c(xmin = -83.22, xmax = -83.12, ymin = 42.25, ymax = 42.35), 
   st_transform(MI_SOUTH) |>
   st_bbox()
 
-ggplot() +
-  annotation_raster(img, xmin, xmax, ymin, ymax) +
-  geom_sf(data = new_d15_p, fill = NA, color = "red", linewidth = 1.2) +
-  geom_sf(data = new_d16_p, fill = NA, color = "blue", linewidth = 1.2) +
-  coord_sf(crs = MI_SOUTH, xlim = zoom_bb[c("xmin", "xmax")], ylim = zoom_bb[c("ymin", "ymax")], expand = FALSE) +
-  labs(title = "Zoom: Allen Park / Melvindale / Lincoln Park / Ecorse") +
-  theme_minimal()
+render_overlay(ROTATION_DEG, SCALE_X, SCALE_Y, SHIFT_X, SHIFT_Y,
+               xlim = zoom_bb[c("xmin", "xmax")], ylim = zoom_bb[c("ymin", "ymax")],
+               title = "Zoom: Allen Park / Melvindale / Lincoln Park / Ecorse")
 ```
 
 The corrected District 16 (blue) traces the Census map's Downriver outline
