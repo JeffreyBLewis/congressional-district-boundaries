@@ -1,0 +1,173 @@
+---
+title: "Fix Washington CD 4 Overlaps From Issue #18"
+format: html
+editor: source
+---
+
+## Overview
+
+[Issue #18](https://github.com/JeffreyBLewis/congressional-district-boundaries/issues/18)
+reports that in `Washington_099_to_102.geojson` (99th-102nd Congress,
+1985-1993), District 4's polygon overlaps four neighboring districts by
+small but non-zero amounts:
+
+| Pair | Intersection (deg²) | ~Sq mi |
+|---|---|---|
+| WA-02 ∩ WA-04 | 0.000846 | ~2.7 |
+| WA-03 ∩ WA-04 | 0.000144 | ~0.5 |
+| WA-04 ∩ WA-05 | 0.000003 | ~0.01 |
+| WA-04 ∩ WA-08 | 0.000014 | ~0.05 |
+
+The reporter noted that District 4 is the common participant in every
+overlap, suggesting District 4's own polygon is the source of the bad
+edges rather than each neighbor independently. A follow-up comment from
+the repo owner confirmed the overlaps are small relative to district size
+and fall along water bodies (mainly the Columbia River), and flagged this
+as part of a broader topology-cleanup effort. A later comment from a third
+party additionally reported District 6 overlapping District 8 with a
+non-contiguous piece of District 6; that's checked and addressed separately
+below since it turns out not to be reproducible against the current file.
+
+```{r}
+#| message: false
+library(tidyverse)
+library(sf)
+sf_use_s2(FALSE)
+```
+
+## Confirming the bug
+
+```{r}
+GEOJSON_FILE <- "../../GeoJson/Washington_099_to_102.geojson"
+wa <- st_read(GEOJSON_FILE, quiet = TRUE)
+
+all_pairs <- combn(sort(unique(wa$district)), 2, simplify = FALSE)
+overlaps <- map_dfr(all_pairs, function(p) {
+  a <- wa |> filter(district == p[1]) |> st_geometry()
+  b <- wa |> filter(district == p[2]) |> st_geometry()
+  area <- as.numeric(st_area(st_intersection(a, b)))
+  tibble(d1 = p[1], d2 = p[2], area_sqm = if (length(area) == 0) 0 else area)
+}) |>
+  filter(area_sqm > 0) |>
+  arrange(desc(area_sqm))
+overlaps
+```
+
+This reproduces exactly the four overlaps reported in the issue, and finds
+no others anywhere else in the file -- confirming District 4 is indeed the
+only district with a topology problem here.
+
+## Determining the fix
+
+Plotting one of the overlaps (District 2 vs. District 4, the largest) shows
+the overlap isn't a small localized patch, but a thin ribbon running along
+almost the *entire* shared boundary -- classic evidence that the two
+districts' shared edge was digitized twice, as two slightly different
+lines, rather than sharing a single common boundary:
+
+```{r}
+#| fig-width: 6
+#| fig-height: 8
+d2 <- wa |> filter(district == 2) |> st_geometry()
+d4 <- wa |> filter(district == 4) |> st_geometry()
+overlap_24 <- st_intersection(d2, d4)
+
+ggplot() +
+  geom_sf(data = d2, fill = NA, color = "red") +
+  geom_sf(data = d4, fill = NA, color = "blue") +
+  geom_sf(data = overlap_24, fill = "magenta", color = "magenta") +
+  coord_sf(xlim = st_bbox(st_buffer(overlap_24, 0.05))[c("xmin", "xmax")],
+           ylim = st_bbox(st_buffer(overlap_24, 0.05))[c("ymin", "ymax")]) +
+  labs(title = "District 2 (red) / District 4 (blue), overlap in magenta") +
+  theme_minimal()
+```
+
+Since District 4 is the only common participant, and none of its four
+neighbors overlap *each other*, trimming District 4 back to exclude
+whatever its neighbors already claim resolves every overlap at once without
+touching District 2, 3, 5, or 8 at all -- consistent with the issue's own
+diagnosis that District 4's polygon is the source of the bad edges. The
+overlap slivers are tiny relative to District 4 (about 3.3 sq mi total, out
+of a district of several thousand square miles), so there's no realistic
+scenario where the "correct" fix instead requires enlarging District 4 at
+its neighbors' expense.
+
+## Fix
+
+```{r}
+d3 <- wa |> filter(district == 3) |> st_geometry()
+d5 <- wa |> filter(district == 5) |> st_geometry()
+d8 <- wa |> filter(district == 8) |> st_geometry()
+
+neighbors <- st_union(c(d2, d3, d5, d8)) |> st_make_valid()
+new_d4_geom <- st_difference(d4, neighbors) |> st_make_valid()
+
+new_d4 <- wa |> filter(district == 4) |> st_set_geometry(new_d4_geom)
+```
+
+## Validation
+
+The new District 4 is a valid MultiPolygon with the same six parts as
+before (five untouched islands plus the trimmed mainland), no new interior
+holes, and no overlap with any neighbor:
+
+```{r}
+st_is_valid(new_d4)
+
+count_holes <- function(x) {
+  sum(sapply(st_geometry(x), function(g) {
+    parts <- if (inherits(g, "MULTIPOLYGON")) g else list(g)
+    sum(sapply(parts, function(p) length(p) - 1))
+  }))
+}
+count_holes(new_d4)
+
+length(st_cast(st_geometry(new_d4), "MULTIPOLYGON", warn = FALSE)[[1]])
+
+sapply(c(2, 3, 5, 8), function(d) {
+  as.numeric(st_area(st_intersection(st_geometry(new_d4), wa |> filter(district == d) |> st_geometry())))
+})
+```
+
+Area lost is negligible and matches the sum of the reported overlaps, and
+every other district (including 2, 3, 5, and 8 themselves) is completely
+untouched:
+
+```{r}
+as.numeric(st_area(d4)) - as.numeric(st_area(new_d4))
+
+wa_other <- wa |> filter(district != 4)
+new_wa <- bind_rows(wa_other, new_d4) |> arrange(district)
+
+identical(
+  wa |> filter(district != 4) |> st_geometry(),
+  new_wa |> filter(district != 4) |> st_geometry()
+)
+```
+
+## The District 6 / District 8 report
+
+A later comment on the issue reported District 6 overlapping District 8,
+with the overlapping piece of District 6 non-contiguous from the rest of
+District 6. Checking directly against the current file finds no overlap
+between District 6 and District 8 at all:
+
+```{r}
+d6 <- wa |> filter(district == 6) |> st_geometry()
+as.numeric(st_area(st_intersection(d6, d8)))
+```
+
+District 6 does have many disconnected parts (it's a Puget Sound district
+with many islands, so some fragmentation is expected), but none of them
+overlap District 8. This isn't reproducible against the current file, so
+it's left out of this patch -- it may have already been resolved by
+whatever produced the current file, or the report may have been against a
+stale copy of the data. If it recurs, it likely needs its own issue/patch
+rather than folding it in here.
+
+## Write out the corrected file
+
+```{r}
+unlink(GEOJSON_FILE)
+st_write(new_wa, GEOJSON_FILE, append = FALSE)
+```
