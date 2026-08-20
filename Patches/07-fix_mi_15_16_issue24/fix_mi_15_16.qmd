@@ -1,0 +1,559 @@
+---
+title: "Fix Michigan CD 15/16 Boundary From Issue #24"
+format: html
+editor: source
+---
+
+## Overview
+
+Benjamin Dasilva reported in [Issue #24](https://github.com/JeffreyBLewis/congressional-district-boundaries/issues/24)
+that in `Michigan_089_to_092.geojson` (89th-92nd Congress, 1965-1972), the
+suburban ("Downriver") portion of District 16 is incorrectly included in
+District 15, and that the on-file District 16 shape only covers "the Detroit
+portion of the district."
+
+```{r}
+#| message: false
+library(tidyverse)
+library(sf)
+library(tigris)
+library(readxl)
+options(tigris_use_cache = TRUE)
+sf_use_s2(FALSE)
+```
+
+## Confirming the bug
+
+```{r}
+GEOJSON_FILE <- "../../GeoJson/Michigan_089_to_092.geojson"
+mi <- st_read(GEOJSON_FILE, quiet = TRUE)
+d15 <- mi |> filter(district == 15)
+d16 <- mi |> filter(district == 16)
+
+# The `Fix` section below rewrites GEOJSON_FILE in place and assumes it's
+# starting from the original, buggy shapes (single-part D16, just the
+# Delray panhandle). Once this patch has been applied once, GEOJSON_FILE
+# on disk *is* the fixed output, and re-rendering against its own prior
+# output breaks partway through. Detect that (fixed D16 has multiple
+# parts; the original never did) and fall back to the pre-patch version on
+# `master` -- this branch hasn't merged yet, so `master` is still the
+# correct pristine baseline -- so this doc stays safely re-runnable while
+# the fix (including the alignment tuning below) is still being iterated
+# on.
+if (length(st_cast(st_geometry(d16), "POLYGON", warn = FALSE)) > 1) {
+  orig_file <- tempfile(fileext = ".geojson")
+  writeLines(system2("git", c("show", "master:GeoJson/Michigan_089_to_092.geojson"), stdout = TRUE), orig_file)
+  mi <- st_read(orig_file, quiet = TRUE)
+  d15 <- mi |> filter(district == 15)
+  d16 <- mi |> filter(district == 16)
+}
+```
+
+On file, `district == 16` is tiny (`{r} as.numeric(st_area(d16))` sq. m,
+vs. `{r} as.numeric(st_area(d15))` for `district == 15`). Comparing it to
+current Wayne County, MI civil boundaries (which for these long-incorporated
+cities are essentially unchanged since the 1960s) shows what it actually is:
+
+```{r}
+wayne_cousub <- county_subdivisions(state = "MI", county = "Wayne", cb = TRUE, year = 2020) |>
+  st_transform(st_crs(mi))
+
+detroit <- wayne_cousub |> filter(NAME == "Detroit")
+as.numeric(st_area(st_intersection(st_geometry(d16), st_geometry(detroit)))) /
+  as.numeric(st_area(d16))
+```
+
+Essentially all (>99.9%) of the on-file District 16 shape sits inside the
+City of Detroit -- specifically, its irregular southwestern ("Delray")
+panhandle that pokes down between Melvindale, Dearborn, and River Rouge
+along the Rouge River. That panhandle is geographically cut off from the
+rest of Detroit by the surrounding suburbs, so it plausibly really was
+drawn into the surrounding 16th district. But essentially none of the
+Downriver suburbs that should make up the bulk of District 16 are present.
+
+## Determining the correct boundary
+
+The Census Bureau's scanned map of Wayne County for the 89th Congress
+(attached to the issue) shows District 16's approximate outline, but hand
+tracing which side of a hand-drawn, 55-year-old scanned line a given city
+falls on is error-prone -- an initial pass at this patch misread the line
+around Melvindale/Allen Park/Lincoln Park from the scan alone and got it
+wrong. The same UCLA project that produced this repository's source data
+also published a per-state, per-era notes file documenting exactly which
+counties/townships/cities were assigned to each district, citing the
+actual 1964 Michigan apportionment law (Act 282) as its source. That's a
+much more reliable, unambiguous reference than reading a scan, so it's
+used here as ground truth:
+
+```{r}
+notes_url <- "https://cdmaps.polisci.ucla.edu/doc/89-92cc_Michigan_Notes.xlsx"
+notes_file <- tempfile(fileext = ".xlsx")
+download.file(notes_url, notes_file, quiet = TRUE, mode = "wb")
+
+raw <- read_excel(notes_file, sheet = "Sheet1", col_names = FALSE)
+notes <- raw |>
+  filter(row_number() > which(raw[[1]] == "State")) |>
+  set_names(c("state", "district", "county", "x4", "x5", "x6", "progress", "note")) |>
+  filter(district %in% c("15", "16"), county == "Wayne") |>
+  select(district, note)
+
+notes |> pull(note) |> walk(\(x) {cat(strwrap(x, width = 90), sep = "\n"); cat("\n\n")})
+```
+
+District 15's Wayne County territory is: townships of Canton, Dearborn,
+Huron, Nankin, Romulus, Sumpter, Taylor, Van Buren; cities of Allen Park,
+Belleville, Dearborn Heights, Garden City, Lincoln Park, Melvindale, Wayne.
+
+District 16's Wayne County territory is: townships of Brownstown and Grosse
+Ile; cities of Dearborn, Ecorse, Gibraltar, River Rouge, Riverview,
+Southgate, Trenton, Wyandotte; plus the part of the City of Detroit
+described as the panhandle already correctly on file (confirmed above).
+
+So Melvindale, Allen Park, and Lincoln Park -- despite sitting geographically
+between Dearborn and the rest of Downriver -- are District 15, forming a
+peninsula that pokes into what's otherwise District 16 territory. Woodhaven,
+Flat Rock, and Rockwood aren't named explicitly (they incorporated out of
+Brownstown Township in 1965-68, shortly after the 1964 law was written), but
+nothing in the notes or the map shows any district line cutting them off
+from the rest of the Downriver cluster, so they're treated as inheriting
+Brownstown Township's District 16 assignment.
+
+```{r}
+d16_places <- c("Dearborn", "Ecorse", "River Rouge", "Southgate", "Wyandotte",
+                "Riverview", "Trenton", "Gibraltar", "Woodhaven", "Flat Rock",
+                "Rockwood", "Brownstown", "Grosse Ile")
+target <- wayne_cousub |>
+  filter(NAME %in% d16_places) |>
+  st_union() |>
+  st_make_valid()
+
+tibble(
+  district = c(15, 16),
+  area_sqm = c(as.numeric(st_area(d15)), as.numeric(st_area(d16))),
+  frac_of_target_cities = c(
+    as.numeric(st_area(st_intersection(st_geometry(d15), target))) / as.numeric(st_area(target)),
+    as.numeric(st_area(st_intersection(st_geometry(d16), target))) / as.numeric(st_area(target))
+  )
+)
+```
+
+96% of the cities/townships that should be District 16 are instead part of
+District 15 on file, confirming the bug.
+
+Checking the neighboring era files (`Michigan_093_to_097.geojson`,
+`Michigan_098_to_102.geojson`, `Michigan_103_to_107.geojson`) shows their
+`district == 15`/`16` boundaries were redrawn at each subsequent
+redistricting (Michigan's district lines here were not static), so they
+aren't used to infer the 89-92 boundary -- the notes file is the only
+source used for that.
+
+## Fix
+
+Move the correct District 16 cities/townships (clipped to the existing
+District 15/16 combined area, so we don't take territory from neighboring
+districts 1 or 17) from District 15 to District 16, keeping the existing
+(correct) Detroit panhandle piece as part of District 16 as well.
+
+Doing this with a naive `st_intersection`/`st_difference` leaves visible
+artifacts, for several separate reasons found by actually checking the
+result against the Census map and against real water/land data (numeric
+checks like area conservation and per-city coverage all looked fine and
+still missed every one of these):
+
+  - `wayne_cousub`'s coastline (modern TIGER data) doesn't exactly line up
+    with the 1970 Census shapefile's coastline along the Detroit River, and
+    cutting along it directly leaves a scatter of sliver fragments on the
+    shore -- some are thin enough to look like stray line segments once
+    written out, others are small chunks of open water masquerading as
+    land.
+  - The original (pre-fix, untouched) `district == 15` shape already
+    contains a spurious ~2km-long, ~30m-wide spike near Ecorse -- a
+    pre-existing digitizing glitch in the 1970 source data, unrelated to
+    this bug, but this patch is already rebuilding this exact area so it's
+    addressed here too rather than left in place.
+  - A handful of small fragments end up geographically disconnected from
+    their own district's mainland while directly touching the other
+    district -- an orphan of the cut, not real geography.
+
+Fixed in a projected CRS (Michigan State Plane South, so distances are in
+meters and the cleanup thresholds below mean what they say); the result is
+transformed back to the file's own CRS for writing -- the projection is
+just a computational tool for this step, not something that ends up in the
+data.
+
+```{r}
+#| message: false
+MI_SOUTH <- 6498 # NAD83(2011) / Michigan South, meters
+orig_crs <- st_crs(mi)
+
+d15_p <- st_transform(d15, MI_SOUTH)
+d16_p <- st_transform(d16, MI_SOUTH)
+target_p <- st_transform(target, MI_SOUTH)
+
+# Strip the pre-existing spike from the combined D15/D16 outline once, up
+# front, via a morphological "opening" (erode then dilate by the same
+# radius): anything narrower than 2x the radius is removed, wider features
+# are left intact. 25m safely clears the ~30m-wide spike while being far
+# smaller than any real neighborhood/parcel here.
+region_raw <- st_union(st_geometry(d15_p), st_geometry(d16_p)) |> st_make_valid()
+region <- st_buffer(st_buffer(region_raw, -25), 25) |> st_make_valid()
+d15_p <- st_intersection(st_geometry(d15_p), region) |> st_make_valid()
+d16_p <- st_intersection(st_geometry(d16_p), region) |> st_make_valid()
+
+target_snapped <- st_snap(target_p, st_boundary(region), tolerance = 75) |> st_make_valid()
+target_clip <- st_intersection(target_snapped, region) |> st_make_valid()
+
+new_d16_geom <- st_union(d16_p, target_clip) |> st_make_valid()
+new_d15_geom <- st_difference(d15_p, target_clip) |> st_make_valid()
+```
+
+This dataset never assigns open water to any district (checked earlier
+against District 13's Detroit shoreline), so real major water bodies --
+the Detroit River and Lake Erie, specifically, not every farm pond or
+marina slip in the raw TIGER hydrography layer, which would instead shred
+real islands into unrealistic hyper-detail this 1970s-generalized dataset
+never had -- are used as a second, independent signal for telling real land
+from a mismatch sliver, on top of shape compactness (`4*pi*area/perimeter^2`;
+a real (if small) river island runs ~0.1-0.7, a thin sliver runs under
+~0.05) and a small absolute-size floor:
+
+```{r}
+#| message: false
+water <- area_water("MI", "Wayne", year = 2020) |>
+  st_transform(MI_SOUTH) |>
+  filter(as.numeric(st_area(geometry)) >= 100000) |>
+  st_geometry() |>
+  st_union() |>
+  st_make_valid()
+
+# Split into whole connected parts and keep only ones that look like real
+# land: big enough, not majority open water, not a thin ribbon. Filtering
+# whole parts (rather than subtracting water from the geometry) avoids
+# fragmenting real islands along every narrow channel between them.
+filter_parts <- function(g, crs, min_area_sqm = 2500, max_water_frac = 0.3, min_compactness = 0.08) {
+  gc <- st_sfc(g, crs = crs) |> st_collection_extract("POLYGON") |> st_make_valid()
+  parts <- st_cast(gc, "MULTIPOLYGON", warn = FALSE) |> st_cast("POLYGON", warn = FALSE)
+  areas <- as.numeric(st_area(parts))
+  perims <- as.numeric(st_length(st_cast(parts, "MULTILINESTRING", warn = FALSE)))
+  compactness <- 4 * pi * areas / perims^2
+  water_frac <- sapply(seq_along(parts), function(i) {
+    wa <- tryCatch(sum(as.numeric(st_area(st_intersection(parts[i], water)))), error = function(e) 0)
+    if (length(wa) == 0) wa <- 0
+    wa / areas[i]
+  })
+  parts[areas >= min_area_sqm & water_frac <= max_water_frac & compactness >= min_compactness]
+}
+
+d15_parts <- filter_parts(new_d15_geom, MI_SOUTH)
+d16_parts <- filter_parts(new_d16_geom, MI_SOUTH)
+```
+
+District 15's Wayne County territory is one contiguous block of townships
+per the notes (District 16 is the one with a naturally island-dotted river
+coastline), so any surviving District 15 fragment that doesn't touch
+District 15's own mainland -- but does touch District 16 -- almost
+certainly belongs there instead of being an orphan of the cut:
+
+```{r}
+d15_areas <- as.numeric(st_area(st_sfc(d15_parts, crs = MI_SOUTH)))
+main_d15 <- d15_parts[which.max(d15_areas)]
+touches_main <- st_touches(st_sfc(d15_parts, crs = MI_SOUTH), st_sfc(main_d15, crs = MI_SOUTH), sparse = FALSE)[, 1]
+orphans <- d15_parts[!touches_main]
+if (length(orphans) > 0) {
+  touches_d16 <- st_touches(st_sfc(orphans, crs = MI_SOUTH), st_union(st_sfc(d16_parts, crs = MI_SOUTH)), sparse = FALSE)[, 1]
+  d16_parts <- c(d16_parts, orphans[touches_d16])
+  d15_parts <- c(d15_parts[touches_main], orphans[!touches_d16])
+}
+
+new_d15_misp <- st_sfc(st_union(st_sfc(d15_parts, crs = MI_SOUTH)) |> st_make_valid(), crs = MI_SOUTH)
+new_d16_misp <- st_sfc(st_union(st_sfc(d16_parts, crs = MI_SOUTH)) |> st_make_valid(), crs = MI_SOUTH)
+
+# Reprojection itself can reintroduce degenerate slivers, so repeat a
+# lightweight version of the same polygon-only cleanup once more after
+# transforming back to the file's own CRS (a 1 sqm floor here -- this pass
+# is only mopping up reprojection noise, not real coastline mismatch).
+clean_final <- function(g, crs, min_area_sqm = 1) {
+  gc <- st_sfc(g, crs = crs) |> st_collection_extract("POLYGON") |> st_make_valid()
+  parts <- st_cast(gc, "MULTIPOLYGON", warn = FALSE) |> st_cast("POLYGON", warn = FALSE)
+  parts <- parts[as.numeric(st_area(parts)) >= min_area_sqm]
+  st_sfc(st_union(parts) |> st_make_valid(), crs = crs)
+}
+
+# `st_snap` + `st_make_valid` along the mismatched (modern TIGER vs. 1970
+# shapefile) coastline also leaves dozens of tiny sliver "donut" holes
+# *inside* otherwise-kept parts (a few to ~20,000 sqm) -- clean_final's
+# area filter can't catch these since it only drops whole parts, not holes
+# within a part that survives. Neither district has any real interior
+# exclusion at this scale (the untouched pre-fix shapes had none, and nor
+# does the rest of the file, bar one ~1,900 sqm blip elsewhere), so drop
+# every hole, keeping only each part's exterior ring.
+strip_holes <- function(x, crs) {
+  st_sfc(lapply(st_geometry(x), function(g) {
+    parts <- if (inherits(g, "MULTIPOLYGON")) g else list(g)
+    st_multipolygon(lapply(parts, function(p) list(p[[1]])))
+  }), crs = crs) |> st_make_valid()
+}
+
+new_d15 <- st_set_geometry(d15, clean_final(st_transform(new_d15_misp, orig_crs)[[1]], orig_crs))
+new_d16 <- st_set_geometry(d16, clean_final(st_transform(new_d16_misp, orig_crs)[[1]], orig_crs))
+new_d15 <- st_set_geometry(new_d15, strip_holes(new_d15, orig_crs))
+new_d16 <- st_set_geometry(new_d16, strip_holes(new_d16, orig_crs))
+
+# At exactly one spot, filling a District 16 hole back in as real territory
+# reclaims ground District 15 already held -- the same underlying boundary
+# ambiguity from the snap, just resolved the other way. Re-enforce
+# non-overlap by ceding any such sliver to District 16 (the freshly
+# unioned shape from `target_clip`/modern TIGER data), then re-strip any
+# hole that difference reintroduces into District 15.
+new_d15 <- st_set_geometry(new_d15, st_sfc(
+  st_difference(st_geometry(new_d15), st_geometry(new_d16)) |> st_make_valid(), crs = orig_crs))
+new_d15 <- st_set_geometry(new_d15, strip_holes(new_d15, orig_crs))
+```
+
+## Validation
+
+Both shapes are valid simple-feature polygons (not stray line/point
+artifacts), area is conserved (up to the sub-parcel slivers dropped above),
+the two new shapes don't overlap, and neither contains a spurious interior
+hole (an earlier version of this fix passed every check below except this
+one -- `st_snap`/`st_make_valid` had quietly left dozens of tiny donut
+holes inside the retained parts, invisible to whole-part filtering and to
+every check above, but visible as stray dashed marks once plotted):
+
+```{r}
+all(st_is_valid(new_d15), st_is_valid(new_d16))
+as.numeric(st_area(region))
+as.numeric(st_area(new_d15)) + as.numeric(st_area(new_d16))
+as.numeric(st_area(st_intersection(new_d15, new_d16)))
+
+count_holes <- function(x) {
+  sum(sapply(st_geometry(x), function(g) {
+    parts <- if (inherits(g, "MULTIPOLYGON")) g else list(g)
+    sum(sapply(parts, function(p) length(p) - 1))
+  }))
+}
+count_holes(new_d15)
+count_holes(new_d16)
+```
+
+District 15 is a single contiguous mainland (as its notes-listed townships
+should be), and District 16's remaining separate parts are all real,
+reasonably-compact land (its natural river islands) rather than mismatch
+debris:
+
+```{r}
+d15_parts_final <- st_cast(st_geometry(new_d15), "MULTIPOLYGON", warn = FALSE)[[1]] |>
+  st_sfc(crs = orig_crs) |> st_cast("POLYGON", warn = FALSE)
+d16_parts_final <- st_cast(st_geometry(new_d16), "MULTIPOLYGON", warn = FALSE)[[1]] |>
+  st_sfc(crs = orig_crs) |> st_cast("POLYGON", warn = FALSE)
+length(d15_parts_final)
+length(d16_parts_final)
+```
+
+District 16 now covers essentially all of its target cities/townships, and
+District 15 essentially none of them:
+
+```{r}
+tibble(
+  district = c(15, 16),
+  frac_of_target_cities = c(
+    as.numeric(st_area(st_intersection(st_geometry(new_d15), target))) / as.numeric(st_area(target)),
+    as.numeric(st_area(st_intersection(st_geometry(new_d16), target))) / as.numeric(st_area(target))
+  )
+)
+```
+
+And each individual city/township lands in the district the notes call for
+(cross-checking Melvindale, Allen Park, and Lincoln Park stayed in District
+15 rather than following their Downriver neighbors into District 16). A few
+of the Downriver cities/townships fall short of 100% in District 16 -- that's
+their share of open water (the Detroit River channel), which, like every
+other district in this dataset (checked against District 13's Detroit
+shoreline), isn't assigned to any district at all, not a bug here:
+
+```{r}
+check_places <- c("Melvindale", "Allen Park", "Lincoln Park", "Dearborn",
+                   "Ecorse", "Wyandotte", "Grosse Ile", "Rockwood")
+map_dfr(check_places, function(nm) {
+  row <- wayne_cousub |> filter(NAME == nm)
+  cg <- st_geometry(row) |> st_union()
+  tibble(
+    place = nm,
+    frac_water = row$AWATER[1] / (row$ALAND[1] + row$AWATER[1]),
+    frac_in_d15 = as.numeric(st_area(st_intersection(cg, st_geometry(new_d15)))) / as.numeric(st_area(cg)),
+    frac_in_d16 = as.numeric(st_area(st_intersection(cg, st_geometry(new_d16)))) / as.numeric(st_area(cg))
+  )
+})
+```
+
+## Write out the corrected file
+
+```{r}
+out <- mi |>
+  filter(!(district %in% c(15, 16))) |>
+  bind_rows(new_d15, new_d16) |>
+  arrange(district)
+
+unlink(GEOJSON_FILE)
+st_write(out, GEOJSON_FILE, append = FALSE)
+```
+
+## Visual validation against the Census map
+
+As a quick sanity check, overlay the corrected District 15/16 shapes
+directly on top of the Census Bureau's own scan of the 89th Congress Wayne
+County map (the one attached to the issue). The scan has no embedded
+coordinates, so it first has to be georeferenced: three small,
+distinctively-shaped municipalities that are easy to pick out by eye in the
+scan -- Plymouth city, Belleville city, and the Highland Park enclave -- and
+whose real-world boundaries have not meaningfully changed since the 1960s,
+are used as control points (their pixel bounding boxes in the scan, matched
+to their `tigris` bounding boxes) to fit a pixel -> map transform.
+
+This fit (and the plot below) is done in the same Michigan State Plane
+South projection used for the fix above, rather than raw lon/lat -- that's
+the natural projection for an official Michigan county-level map like this
+one, and it keeps distances/angles locally undistorted. This is purely for
+drawing the comparison figure; it has no bearing on the `Fix` section above
+or the coordinates written to the GeoJSON file.
+
+```{r}
+#| message: false
+map_url <- "https://github.com/user-attachments/assets/a558df0c-39b7-4198-ab3b-647be0f32307"
+map_file <- tempfile(fileext = ".png")
+download.file(map_url, map_file, quiet = TRUE, mode = "wb")
+
+img <- png::readPNG(map_file)
+img_h <- dim(img)[1]
+img_w <- dim(img)[2]
+
+# Control points: pixel bounding-box corners (col, row) of Plymouth city,
+# Belleville city, and the Highland Park enclave, read off the scan, matched
+# to each city's real (NW, SE) bounding-box corner from `wayne_cousub`
+# (confirmed via st_bbox() on each city, filtered to NAMELSAD == "... city"
+# to avoid the same-named surrounding township), reprojected into Michigan
+# State Plane South (meters).
+gcp <- tibble(
+  place = c("Plymouth NW", "Plymouth SE", "Belleville NW", "Belleville SE",
+            "Highland Park NW", "Highland Park SE"),
+  px    = c(208, 248, 190, 222, 657, 726),
+  py    = c(191, 228, 467, 502, 140, 190),
+  lon   = c(-83.48687, -83.44552, -83.49901, -83.47237, -83.12193, -83.07377),
+  lat   = c(42.38445, 42.35850, 42.21386, 42.19006, 42.41816, 42.38808)
+)
+gcp_xy <- gcp |>
+  st_as_sf(coords = c("lon", "lat"), crs = orig_crs) |>
+  st_transform(MI_SOUTH) |>
+  st_coordinates() |>
+  as_tibble() |>
+  bind_cols(gcp |> select(place, px, py))
+
+x_fit <- lm(X ~ px, data = gcp_xy)
+y_fit <- lm(Y ~ py, data = gcp_xy)
+
+max(abs(residuals(x_fit)))
+max(abs(residuals(y_fit)))
+
+xmin <- predict(x_fit, tibble(px = 0))
+xmax <- predict(x_fit, tibble(px = img_w))
+ymax <- predict(y_fit, tibble(py = 0))
+ymin <- predict(y_fit, tibble(py = img_h))
+```
+
+Residuals are well under 500m at county scale, plenty precise for a visual
+check.
+
+### Manual alignment tuning
+
+`annotation_raster` can only place the scan as an axis-aligned box, so the
+fit above -- independent per-axis regressions, `X ~ px` and `Y ~ py` -- has
+no way to express any rotation between the scan and true north, and a
+55-year-old paper map scan can easily be a degree or two off from square.
+The helpers below apply an extra rotation/dilation/shift to the *displayed
+scan only*, on top of the control-point fit, so different values can be
+tried by eye. None of this touches the `Fix` section above or the
+coordinates written to the GeoJSON file -- it only affects how the scan is
+drawn for this sanity-check figure.
+
+`rotation_deg` is degrees counterclockwise, applied first, about the scan's
+own center, in the scan's own (square) pixel space; `scale_x`/`scale_y`
+then dilate the (already-rotated) scan about that same center -- separately,
+since a scanned sheet can easily have slightly different N-S vs. E-W scale
+(paper stretch, an off-axis scanner bed) -- `> 1` grows that axis; `shift_x`
+/`shift_y` are in map meters (Michigan State Plane South), applied last.
+Note that non-uniform `scale_x`/`scale_y` combined with a nonzero
+`rotation_deg` isn't a pure rotation any more (it shears slightly), but for
+the small angles/ratios relevant here that's not visually significant:
+
+```{r}
+rotated_raster_grob <- function(img, angle_deg) {
+  grid::grobTree(grid::rasterGrob(img, vp = grid::viewport(angle = angle_deg), interpolate = TRUE))
+}
+
+adjusted_bbox <- function(scale_x = 1, scale_y = 1, shift_x = 0, shift_y = 0) {
+  cx <- (xmin + xmax) / 2
+  cy <- (ymin + ymax) / 2
+  list(
+    xmin = cx + (xmin - cx) * scale_x + shift_x,
+    xmax = cx + (xmax - cx) * scale_x + shift_x,
+    ymin = cy + (ymin - cy) * scale_y + shift_y,
+    ymax = cy + (ymax - cy) * scale_y + shift_y
+  )
+}
+
+render_overlay <- function(rotation_deg = 0, scale_x = 1, scale_y = 1, shift_x = 0, shift_y = 0,
+                            xlim = c(xmin, xmax), ylim = c(ymin, ymax), title = "") {
+  bb <- adjusted_bbox(scale_x, scale_y, shift_x, shift_y)
+  ggplot() +
+    annotation_custom(rotated_raster_grob(img, rotation_deg), bb$xmin, bb$xmax, bb$ymin, bb$ymax) +
+    geom_sf(data = new_d15_p, fill = NA, color = "red", linewidth = 1) +
+    geom_sf(data = new_d16_p, fill = NA, color = "blue", linewidth = 1) +
+    coord_sf(crs = MI_SOUTH, xlim = xlim, ylim = ylim, expand = FALSE) +
+    labs(title = title) +
+    theme_minimal()
+}
+```
+
+Now plot the corrected shapes (reprojected to the same CRS) on top of the
+georeferenced scan. Edit `ROTATION_DEG`/`SCALE_X`/`SCALE_Y`/`SHIFT_X`/
+`SHIFT_Y` below and re-render to try a different alignment --
+`0`/`1`/`1`/`0`/`0` reproduces the plain control-point fit with no
+adjustment, matching the figure used for validation above:
+
+```{r}
+#| fig-width: 9
+#| fig-height: 9
+new_d15_p <- st_transform(new_d15, MI_SOUTH)
+new_d16_p <- st_transform(new_d16, MI_SOUTH)
+
+ROTATION_DEG <- 2   # degrees counterclockwise
+SCALE_X <- 1.06        # dilation about the scan's own center, east-west
+SCALE_Y <- 0.96        # dilation about the scan's own center, north-south
+SHIFT_X <- 700       # meters, Michigan State Plane South
+SHIFT_Y <- 1300        # meters
+
+render_overlay(ROTATION_DEG, SCALE_X, SCALE_Y, SHIFT_X, SHIFT_Y,
+               title = "Corrected District 15 (red) / District 16 (blue) vs. Census map")
+```
+
+And zoomed in on Allen Park/Melvindale/Lincoln Park, to check that peninsula
+specifically against the map (using the same `ROTATION_DEG`/`SCALE_X`/
+`SCALE_Y`/`SHIFT_X`/`SHIFT_Y` set above):
+
+```{r}
+#| fig-width: 8
+#| fig-height: 8
+zoom_bb <- st_bbox(c(xmin = -83.22, xmax = -83.12, ymin = 42.25, ymax = 42.35), crs = orig_crs) |>
+  st_as_sfc() |>
+  st_transform(MI_SOUTH) |>
+  st_bbox()
+
+render_overlay(ROTATION_DEG, SCALE_X, SCALE_Y, SHIFT_X, SHIFT_Y,
+               xlim = zoom_bb[c("xmin", "xmax")], ylim = zoom_bb[c("ymin", "ymax")],
+               title = "Zoom: Allen Park / Melvindale / Lincoln Park / Ecorse")
+```
+
+The corrected District 16 (blue) traces the Census map's Downriver outline
+as clean, closed polygon edges (no stray sliver marks), including the full
+extent south to Rockwood/Flat Rock, while District 15 (red) keeps its
+Allen Park/Melvindale/Lincoln Park peninsula intact.
