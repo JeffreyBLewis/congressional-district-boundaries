@@ -84,24 +84,66 @@ ggplot() +
 ```
 
 Since District 4 is the only common participant, and none of its four
-neighbors overlap *each other*, trimming District 4 back to exclude
-whatever its neighbors already claim resolves every overlap at once without
-touching District 2, 3, 5, or 8 at all -- consistent with the issue's own
-diagnosis that District 4's polygon is the source of the bad edges. The
-overlap slivers are tiny relative to District 4 (about 3.3 sq mi total, out
-of a district of several thousand square miles), so there's no realistic
-scenario where the "correct" fix instead requires enlarging District 4 at
-its neighbors' expense.
+neighbors overlap *each other*, District 4's neighbors can be trusted as
+the authoritative edge here -- consistent with the issue's own diagnosis
+that District 4's polygon is the source of the bad edges. Trimming
+District 4 back to exclude whatever its neighbors already claim (a plain
+`st_difference`) resolves every overlap, but it's not the whole story: it
+only removes territory District 4 wrongly claimed, so any spot where
+District 4's original line instead fell *short* of a neighbor's true edge
+is left as a thin unclaimed gap -- the other side of the same
+double-digitized-edge problem. Since a neighbor's own boundary is trusted
+here, the more complete fix is to snap District 4's edge directly onto
+each neighbor's actual boundary line wherever they run close together,
+rather than just subtracting: build a thin ribbon that traces each
+neighbor's true boundary near District 4, add it to District 4, then
+subtract the neighbors themselves -- so the result is bounded exactly by
+the neighbor's real edge, closing gaps and overlaps alike, without
+resorting to a blunt buffer-the-whole-polygon approach (tried first, and
+dropped -- see the basemap check below for why).
 
 ## Fix
 
 ```{r}
+#| message: false
 d3 <- wa |> filter(district == 3) |> st_geometry()
 d5 <- wa |> filter(district == 5) |> st_geometry()
 d8 <- wa |> filter(district == 8) |> st_geometry()
 
-neighbors <- st_union(c(d2, d3, d5, d8)) |> st_make_valid()
-new_d4_geom <- st_difference(d4, neighbors) |> st_make_valid()
+WA_ALBERS <- 5070 # NAD83 Conus Albers, meters
+orig_crs <- st_crs(wa)
+
+to_albers <- function(x) st_transform(x, WA_ALBERS)
+d2p <- to_albers(d2); d3p <- to_albers(d3); d4p <- to_albers(d4)
+d5p <- to_albers(d5); d8p <- to_albers(d8)
+neighbors_p <- st_union(c(d2p, d3p, d5p, d8p)) |> st_make_valid()
+
+# For each neighbor, a thin ribbon along *that neighbor's own* boundary,
+# restricted to the stretch actually near District 4 (so it can't reach
+# into a neighbor's boundary with some other, unrelated district). 150m is
+# comfortably wider than the gaps/overlaps found above (worst case ~40m
+# average width over the D2 boundary) without being so wide it starts
+# picking up unrelated detail.
+RIBBON_TOL <- 150
+ribbons <- lapply(list(d2p, d3p, d5p, d8p), function(nb) {
+  near_d4 <- st_intersection(st_boundary(nb), st_buffer(d4p, RIBBON_TOL))
+  st_buffer(near_d4, RIBBON_TOL) |> st_make_valid()
+})
+d4_filled <- st_union(d4p, st_union(do.call(c, ribbons))) |> st_make_valid()
+new_d4_geom <- st_difference(d4_filled, neighbors_p) |> st_make_valid()
+
+# As in the MI 15/16 patch, this kind of union/difference chain can leave
+# tiny spurious interior holes that whole-part filtering can't catch since
+# they're inside a part that's otherwise kept. District 4 has no real
+# interior exclusion at this scale, so drop any hole outright.
+strip_holes <- function(x, crs) {
+  st_sfc(lapply(st_geometry(x), function(g) {
+    parts <- if (inherits(g, "MULTIPOLYGON")) g else list(g)
+    st_multipolygon(lapply(parts, function(p) list(p[[1]])))
+  }), crs = crs) |> st_make_valid()
+}
+new_d4_geom <- strip_holes(st_sfc(new_d4_geom, crs = WA_ALBERS), WA_ALBERS)
+new_d4_geom <- st_transform(new_d4_geom, orig_crs)
 
 new_d4 <- wa |> filter(district == 4) |> st_set_geometry(new_d4_geom)
 ```
@@ -109,8 +151,8 @@ new_d4 <- wa |> filter(district == 4) |> st_set_geometry(new_d4_geom)
 ## Validation
 
 The new District 4 is a valid MultiPolygon with the same six parts as
-before (five untouched islands plus the trimmed mainland), no new interior
-holes, and no overlap with any neighbor:
+before (five untouched islands plus the trimmed/extended mainland), no
+interior holes, and no overlap with any neighbor:
 
 ```{r}
 st_is_valid(new_d4)
@@ -130,8 +172,25 @@ sapply(c(2, 3, 5, 8), function(d) {
 })
 ```
 
-Area lost is negligible and matches the sum of the reported overlaps, and
-every other district (including 2, 3, 5, and 8 themselves) is completely
+And, unlike a plain trim, the gaps along these same boundaries are now
+closed too -- checking within a 5m margin (tight enough that only a
+genuine unclosed gap would show up, not floating-point/reprojection noise)
+finds none of any consequence, versus tens to hundreds of thousands of
+square meters before fixing:
+
+```{r}
+gap_area <- function(a, b, tol_m) {
+  a_p <- st_transform(a, WA_ALBERS); b_p <- st_transform(b, WA_ALBERS)
+  zone <- st_intersection(st_buffer(a_p, tol_m), st_buffer(b_p, tol_m))
+  as.numeric(st_area(st_difference(st_difference(zone, a_p), b_p)))
+}
+sapply(c(2, 3, 5, 8), function(d) {
+  gap_area(st_geometry(new_d4), wa |> filter(district == d) |> st_geometry(), 5)
+})
+```
+
+Area change is modest (net of overlap removed and gap filled) and every
+other district (including 2, 3, 5, and 8 themselves) is completely
 untouched:
 
 ```{r}
@@ -230,15 +289,15 @@ ggplot() +
   theme_minimal()
 ```
 
-(An earlier version of this patch tried to also close the small residual
-gaps left along these same boundaries -- areas neither district claims,
-the flip side of the overlaps fixed above -- using a snap/buffer-based
-fill. That approach was dropped: it introduced exactly the kind of
-spurious zigzag artifact this section checks for, in this same glacier
-area, without any real feature to justify it. The gaps left by the
-overlap-only fix here are thin, sub-visual slivers -- invisible at any
-sane viewing scale -- so closing them isn't worth the risk of visibly
-worse geometry.)
+(An earlier version of this fix closed gaps by buffering District 4's
+*whole* polygon outward and eroding it back -- a blunt instrument that,
+right in this glacier area, produced exactly the kind of spurious zigzag
+this section checks for, by entangling nearby lake/glacier shoreline
+detail it had no business touching. Snapping a thin ribbon directly onto
+each neighbor's own boundary line instead -- the version fixed above --
+avoids that: it only ever touches the narrow strip actually adjacent to
+the true edge, so it can't reach into unrelated complexity a few hundred
+meters away.)
 
 ## The District 6 / District 8 report
 
