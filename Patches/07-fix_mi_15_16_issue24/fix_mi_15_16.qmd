@@ -261,21 +261,61 @@ clean_final <- function(g, crs, min_area_sqm = 1) {
   st_sfc(st_union(parts) |> st_make_valid(), crs = crs)
 }
 
+# `st_snap` + `st_make_valid` along the mismatched (modern TIGER vs. 1970
+# shapefile) coastline also leaves dozens of tiny sliver "donut" holes
+# *inside* otherwise-kept parts (a few to ~20,000 sqm) -- clean_final's
+# area filter can't catch these since it only drops whole parts, not holes
+# within a part that survives. Neither district has any real interior
+# exclusion at this scale (the untouched pre-fix shapes had none, and nor
+# does the rest of the file, bar one ~1,900 sqm blip elsewhere), so drop
+# every hole, keeping only each part's exterior ring.
+strip_holes <- function(x, crs) {
+  st_sfc(lapply(st_geometry(x), function(g) {
+    parts <- if (inherits(g, "MULTIPOLYGON")) g else list(g)
+    st_multipolygon(lapply(parts, function(p) list(p[[1]])))
+  }), crs = crs) |> st_make_valid()
+}
+
 new_d15 <- st_set_geometry(d15, clean_final(st_transform(new_d15_misp, orig_crs)[[1]], orig_crs))
 new_d16 <- st_set_geometry(d16, clean_final(st_transform(new_d16_misp, orig_crs)[[1]], orig_crs))
+new_d15 <- st_set_geometry(new_d15, strip_holes(new_d15, orig_crs))
+new_d16 <- st_set_geometry(new_d16, strip_holes(new_d16, orig_crs))
+
+# At exactly one spot, filling a District 16 hole back in as real territory
+# reclaims ground District 15 already held -- the same underlying boundary
+# ambiguity from the snap, just resolved the other way. Re-enforce
+# non-overlap by ceding any such sliver to District 16 (the freshly
+# unioned shape from `target_clip`/modern TIGER data), then re-strip any
+# hole that difference reintroduces into District 15.
+new_d15 <- st_set_geometry(new_d15, st_sfc(
+  st_difference(st_geometry(new_d15), st_geometry(new_d16)) |> st_make_valid(), crs = orig_crs))
+new_d15 <- st_set_geometry(new_d15, strip_holes(new_d15, orig_crs))
 ```
 
 ## Validation
 
 Both shapes are valid simple-feature polygons (not stray line/point
 artifacts), area is conserved (up to the sub-parcel slivers dropped above),
-and the two new shapes don't overlap:
+the two new shapes don't overlap, and neither contains a spurious interior
+hole (an earlier version of this fix passed every check below except this
+one -- `st_snap`/`st_make_valid` had quietly left dozens of tiny donut
+holes inside the retained parts, invisible to whole-part filtering and to
+every check above, but visible as stray dashed marks once plotted):
 
 ```{r}
 all(st_is_valid(new_d15), st_is_valid(new_d16))
 as.numeric(st_area(region))
 as.numeric(st_area(new_d15)) + as.numeric(st_area(new_d16))
 as.numeric(st_area(st_intersection(new_d15, new_d16)))
+
+count_holes <- function(x) {
+  sum(sapply(st_geometry(x), function(g) {
+    parts <- if (inherits(g, "MULTIPOLYGON")) g else list(g)
+    sum(sapply(parts, function(p) length(p) - 1))
+  }))
+}
+count_holes(new_d15)
+count_holes(new_d16)
 ```
 
 District 15 is a single contiguous mainland (as its notes-listed townships
