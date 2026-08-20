@@ -1,0 +1,401 @@
+---
+title: "Fix Washington CD 4 Overlaps From Issue #18"
+format: html
+editor: source
+---
+
+## Overview
+
+[Issue #18](https://github.com/JeffreyBLewis/congressional-district-boundaries/issues/18)
+reports that in `Washington_099_to_102.geojson` (99th-102nd Congress,
+1985-1993), District 4's polygon overlaps four neighboring districts by
+small but non-zero amounts:
+
+| Pair | Intersection (deg²) | ~Sq mi |
+|---|---|---|
+| WA-02 ∩ WA-04 | 0.000846 | ~2.7 |
+| WA-03 ∩ WA-04 | 0.000144 | ~0.5 |
+| WA-04 ∩ WA-05 | 0.000003 | ~0.01 |
+| WA-04 ∩ WA-08 | 0.000014 | ~0.05 |
+
+The reporter noted that District 4 is the common participant in every
+overlap, suggesting District 4's own polygon is the source of the bad
+edges rather than each neighbor independently. A follow-up comment from
+the repo owner confirmed the overlaps are small relative to district size
+and fall along water bodies (mainly the Columbia River), and flagged this
+as part of a broader topology-cleanup effort. A later comment from a third
+party additionally reported District 6 overlapping District 8 with a
+non-contiguous piece of District 6; that's checked and addressed separately
+below since it turns out not to be reproducible against the current file.
+
+```{r}
+#| message: false
+library(tidyverse)
+library(sf)
+library(ggspatial)
+sf_use_s2(FALSE)
+```
+
+## Confirming the bug
+
+```{r}
+GEOJSON_FILE <- "../../GeoJson/Washington_099_to_102.geojson"
+wa <- st_read(GEOJSON_FILE, quiet = TRUE)
+
+all_pairs <- combn(sort(unique(wa$district)), 2, simplify = FALSE)
+overlaps <- map_dfr(all_pairs, function(p) {
+  a <- wa |> filter(district == p[1]) |> st_geometry()
+  b <- wa |> filter(district == p[2]) |> st_geometry()
+  area <- as.numeric(st_area(st_intersection(a, b)))
+  tibble(d1 = p[1], d2 = p[2], area_sqm = if (length(area) == 0) 0 else area)
+}) |>
+  filter(area_sqm > 0) |>
+  arrange(desc(area_sqm))
+overlaps
+```
+
+This reproduces exactly the four overlaps reported in the issue, and finds
+no others anywhere else in the file -- confirming District 4 is indeed the
+only district with a topology problem here.
+
+## Determining the fix
+
+Plotting one of the overlaps (District 2 vs. District 4, the largest) shows
+the overlap isn't a small localized patch, but a thin ribbon running along
+almost the *entire* shared boundary -- classic evidence that the two
+districts' shared edge was digitized twice, as two slightly different
+lines, rather than sharing a single common boundary:
+
+```{r}
+#| fig-width: 6
+#| fig-height: 8
+d2 <- wa |> filter(district == 2) |> st_geometry()
+d4 <- wa |> filter(district == 4) |> st_geometry()
+overlap_24 <- st_intersection(d2, d4)
+
+ggplot() +
+  geom_sf(data = d2, fill = NA, color = "red") +
+  geom_sf(data = d4, fill = NA, color = "blue") +
+  geom_sf(data = overlap_24, fill = "magenta", color = "magenta") +
+  coord_sf(xlim = st_bbox(st_buffer(overlap_24, 0.05))[c("xmin", "xmax")],
+           ylim = st_bbox(st_buffer(overlap_24, 0.05))[c("ymin", "ymax")]) +
+  labs(title = "District 2 (red) / District 4 (blue), overlap in magenta") +
+  theme_minimal()
+```
+
+Since District 4 is the only common participant, and none of its four
+neighbors overlap *each other*, District 4's neighbors can be trusted as
+the authoritative edge here -- consistent with the issue's own diagnosis
+that District 4's polygon is the source of the bad edges. Trimming
+District 4 back to exclude whatever its neighbors already claim (a plain
+`st_difference`) resolves every overlap, but it's not the whole story: it
+only removes territory District 4 wrongly claimed, so any spot where
+District 4's original line instead fell *short* of a neighbor's true edge
+is left as a thin unclaimed gap -- the other side of the same
+double-digitized-edge problem.
+
+Closing those gaps by *estimating* how far to extend District 4 (a buffer
+distance, a ribbon along a neighbor's line within some tolerance) turned
+out to be the wrong tool for the job: every tolerance that was wide enough
+to bridge one gap either missed another, narrower one nearby, or -- when
+widened further to be safe -- started reaching into unrelated complexity
+(merging separate islands together, or sweeping in hundreds of square
+kilometers of area that was never actually part of this problem). The
+right tool is exact, not approximate: a district boundary vector dataset
+like this one should tile the plane with no gaps between adjacent
+districts, so *any* point inside the combined footprint of all eight
+Washington districts that isn't currently claimed by any of them is
+either open water (not assigned to any district anywhere in this file) or
+a bug. Computing that set difference directly -- rather than guessing a
+distance -- finds every gap adjacent to District 4 in one pass, with nothing
+left to tune:
+
+## Fix
+
+```{r}
+#| message: false
+d1 <- wa |> filter(district == 1) |> st_geometry()
+d3 <- wa |> filter(district == 3) |> st_geometry()
+d5 <- wa |> filter(district == 5) |> st_geometry()
+d6 <- wa |> filter(district == 6) |> st_geometry()
+d7 <- wa |> filter(district == 7) |> st_geometry()
+d8 <- wa |> filter(district == 8) |> st_geometry()
+
+WA_ALBERS <- 5070 # NAD83 Conus Albers, meters
+orig_crs <- st_crs(wa)
+
+to_albers <- function(x) st_transform(x, WA_ALBERS)
+d2p <- to_albers(d2); d3p <- to_albers(d3); d4p <- to_albers(d4)
+d5p <- to_albers(d5); d8p <- to_albers(d8)
+neighbors_p <- st_union(c(d2p, d3p, d5p, d8p)) |> st_make_valid()
+
+# Every point inside 40km of District 4 that isn't currently claimed by any
+# of the state's 8 districts. 40km is just a generous search radius (the
+# fix below only keeps pieces that actually touch District 4, so a wider
+# radius can't over-reach); doubling it to 80km finds nothing new.
+all_claimed_p <- st_union(do.call(c, lapply(
+  list(d1, d2, d3, d4, d5, d6, d7, d8), to_albers
+))) |> st_make_valid()
+search_zone <- st_buffer(d4p, 40000)
+unclaimed <- st_difference(search_zone, all_claimed_p) |> st_make_valid()
+
+# Real gaps here run from ~400,000 to ~16,000,000 sqm; the Washington/Oregon
+# and Washington/Canada state lines also fall within 40km of District 4 in
+# places and produce two enormous "unclaimed" pieces (everything outside
+# the state) that are an artifact of the search radius, not a bug -- an
+# upper bound well below either of those (~2.5 billion sqm) drops them,
+# while a lower bound of 1,000 sqm drops reprojection-noise-scale slivers.
+# Keeping only pieces that actually touch District 4 additionally excludes
+# anything on the far side of a neighbor that isn't really adjacent here.
+parts <- st_cast(unclaimed, "MULTIPOLYGON", warn = FALSE) |> st_cast("POLYGON", warn = FALSE)
+areas <- as.numeric(st_area(parts))
+touches_d4 <- as.numeric(st_distance(parts, d4p)) < 1
+real_gaps <- parts[areas > 1000 & areas < 1e8 & touches_d4]
+length(real_gaps)
+sum(as.numeric(st_area(real_gaps)))
+
+d4_trimmed <- st_difference(d4p, neighbors_p) |> st_make_valid()
+d4_filled <- st_union(d4_trimmed, st_union(real_gaps)) |> st_make_valid()
+new_d4_geom <- st_difference(d4_filled, neighbors_p) |> st_make_valid() # safety re-trim
+
+# As in the MI 15/16 patch, this kind of union/difference chain can leave
+# tiny spurious interior holes that whole-part filtering can't catch since
+# they're inside a part that's otherwise kept. District 4 has no real
+# interior exclusion at this scale, so drop any hole outright.
+strip_holes <- function(x, crs) {
+  st_sfc(lapply(st_geometry(x), function(g) {
+    parts <- if (inherits(g, "MULTIPOLYGON")) g else list(g)
+    st_multipolygon(lapply(parts, function(p) list(p[[1]])))
+  }), crs = crs) |> st_make_valid()
+}
+new_d4_geom <- strip_holes(st_sfc(new_d4_geom, crs = WA_ALBERS), WA_ALBERS)
+new_d4_geom <- st_transform(new_d4_geom, orig_crs)
+
+new_d4 <- wa |> filter(district == 4) |> st_set_geometry(new_d4_geom)
+```
+
+## Validation
+
+The new District 4 is a valid MultiPolygon with the same six parts as
+before (five untouched islands plus the trimmed/extended mainland), no
+interior holes, and no overlap with any neighbor:
+
+```{r}
+st_is_valid(new_d4)
+
+count_holes <- function(x) {
+  sum(sapply(st_geometry(x), function(g) {
+    parts <- if (inherits(g, "MULTIPOLYGON")) g else list(g)
+    sum(sapply(parts, function(p) length(p) - 1))
+  }))
+}
+count_holes(new_d4)
+
+length(st_cast(st_geometry(new_d4), "MULTIPOLYGON", warn = FALSE)[[1]])
+
+sapply(c(2, 3, 5, 8), function(d) {
+  as.numeric(st_area(st_intersection(st_geometry(new_d4), wa |> filter(district == d) |> st_geometry())))
+})
+```
+
+### Checking for any remaining gaps
+
+Two weaker checks were tried before landing on the exact method above, and
+both turned out to be unreliable enough to actually ship: a narrow-corridor
+buffer check (only catches gaps narrower than the corridor -- silently
+missed everything found and fixed above) and a per-boundary-point distance
+sample (an improvement, but still capped by how densely points are
+sampled and which stretches of boundary get checked). The direct,
+exhaustive version doesn't have either failure mode: re-run the identical
+set-difference computation against the *corrected* District 4, and by
+construction anything it finds is a real remaining gap:
+
+```{r}
+new_d4_p <- to_albers(st_geometry(new_d4))
+all_claimed_final <- st_union(c(
+  do.call(c, lapply(list(d1, d3, d5, d6, d7, d8), to_albers)), d2p, new_d4_p
+)) |> st_make_valid()
+
+remaining_unclaimed <- st_difference(st_buffer(new_d4_p, 40000), all_claimed_final) |>
+  st_make_valid()
+remaining_parts <- st_cast(remaining_unclaimed, "MULTIPOLYGON", warn = FALSE) |> st_cast("POLYGON", warn = FALSE)
+remaining_areas <- as.numeric(st_area(remaining_parts))
+remaining_touches <- as.numeric(st_distance(remaining_parts, new_d4_p)) < 1
+sum(remaining_areas > 1000 & remaining_areas < 1e8 & remaining_touches)
+```
+
+Zero -- every real gap adjacent to the corrected District 4 is gone.
+
+Area change is modest (net of overlap removed and gap filled) and every
+other district (including 2, 3, 5, and 8 themselves) is completely
+untouched:
+
+```{r}
+as.numeric(st_area(d4)) - as.numeric(st_area(new_d4))
+
+wa_other <- wa |> filter(district != 4)
+new_wa <- bind_rows(wa_other, new_d4) |> arrange(district)
+
+identical(
+  wa |> filter(district != 4) |> st_geometry(),
+  new_wa |> filter(district != 4) |> st_geometry()
+)
+```
+
+Re-plotting the same District 2/4 boundary zoom from above, but with the
+corrected District 4, shows the overlap ribbon is gone -- the blue line now
+runs cleanly alongside the red one instead of straddling it:
+
+```{r}
+#| fig-width: 6
+#| fig-height: 8
+new_overlap_24 <- st_intersection(d2, st_geometry(new_d4))
+
+ggplot() +
+  geom_sf(data = d2, fill = NA, color = "red") +
+  geom_sf(data = st_geometry(new_d4), fill = NA, color = "blue") +
+  coord_sf(xlim = st_bbox(st_buffer(overlap_24, 0.05))[c("xmin", "xmax")],
+           ylim = st_bbox(st_buffer(overlap_24, 0.05))[c("ymin", "ymax")]) +
+  labs(title = "Corrected: District 2 (red) / District 4 (blue), no more overlap") +
+  theme_minimal()
+```
+
+And the full corrected map, all eight districts:
+
+```{r}
+#| fig-width: 8
+#| fig-height: 8
+new_wa |>
+  ggplot() +
+  geom_sf(aes(fill = as.character(district))) +
+  labs(title = "Washington, 99th-102nd Congress (corrected)", fill = "District") +
+  theme_minimal()
+```
+
+## Visual validation against a real basemap
+
+A closer look at the reported overlaps raised a natural follow-up: are
+these overlaps/gaps small relative to real terrain features (roads,
+rivers, lakes) the district lines should be following, or does the trimmed
+edge look arbitrary? Plotting the corrected District 4 directly on an OSM
+basemap answers that.
+
+Along the Columbia River (District 3/4), the corrected boundary hugs the
+river channel closely, including its small braids and islands -- exactly
+matching the repo owner's original read that these boundaries follow real
+water features:
+
+```{r}
+#| message: false
+#| results: hide
+#| fig-width: 9
+#| fig-height: 7
+d3_4326 <- st_transform(d3, 4326)
+new_d4_4326 <- st_transform(st_geometry(new_d4), 4326)
+
+bb_river <- st_bbox(c(xmin = -122.5, xmax = -121.7, ymin = 45.55, ymax = 45.8), crs = 4326)
+ggplot() +
+  annotation_map_tile(type = "osm", zoomin = 0) +
+  geom_sf(data = d3_4326, fill = NA, color = "red", linewidth = 1) +
+  geom_sf(data = new_d4_4326, fill = NA, color = "blue", linewidth = 1) +
+  coord_sf(xlim = bb_river[c("xmin", "xmax")], ylim = bb_river[c("ymin", "ymax")], crs = 4326) +
+  labs(title = "District 3 (red) / corrected District 4 (blue) along the Columbia River") +
+  theme_minimal()
+```
+
+Near the District 2/4 boundary in the remote North Cascades (around the
+Chickamin Glacier, well above any road), the corrected line now sits
+exactly on top of District 2's -- close enough that only blue is visible,
+drawn last -- closing what was actually four separate small gaps here
+(totaling ~4,600,000 sqm) that a 150m-tolerance ribbon fix had missed
+entirely, since real-world offsets in this stretch turned out to run
+wider than that in places. There's no road/river to follow here, so the
+line most likely follows a section-line or ridge, but critically the
+exact fix doesn't introduce any spurious zigzags getting there:
+
+```{r}
+#| message: false
+#| results: hide
+#| fig-width: 9
+#| fig-height: 9
+d2_4326 <- st_transform(d2, 4326)
+
+bb_glacier <- st_bbox(c(xmin = -121.3, xmax = -120.9, ymin = 48.25, ymax = 48.45), crs = 4326)
+ggplot() +
+  annotation_map_tile(type = "osm", zoomin = 0) +
+  geom_sf(data = d2_4326, fill = NA, color = "red", linewidth = 1) +
+  geom_sf(data = new_d4_4326, fill = NA, color = "blue", linewidth = 1) +
+  coord_sf(xlim = bb_glacier[c("xmin", "xmax")], ylim = bb_glacier[c("ymin", "ymax")], crs = 4326) +
+  labs(title = "District 2 (red) / corrected District 4 (blue) near Chickamin Glacier") +
+  theme_minimal()
+```
+
+The largest single piece the exact fix found is a ~16,000,000 sqm wedge
+against District 2 around the Suiattle/White Chuck/Honeycomb glaciers,
+where District 4's original line cut a crude straight diagonal across
+terrain District 2's line follows in real, glacier-by-glacier detail.
+Plotting both versions confirms it: the original line (gray dashed)
+ignores the glacier outlines entirely, while the corrected one (blue) now
+sits right on top of District 2's detailed line:
+
+```{r}
+#| message: false
+#| results: hide
+#| fig-width: 9
+#| fig-height: 7
+d4_orig_4326 <- st_transform(d4, 4326)
+
+bb_suiattle <- st_bbox(c(xmin = -121.28, xmax = -120.98, ymin = 47.93, ymax = 48.13), crs = 4326)
+ggplot() +
+  annotation_map_tile(type = "osm", zoomin = 0) +
+  geom_sf(data = d4_orig_4326, fill = NA, color = "gray40", linewidth = 0.8, linetype = "dashed") +
+  geom_sf(data = d2_4326, fill = NA, color = "red", linewidth = 1) +
+  geom_sf(data = new_d4_4326, fill = NA, color = "blue", linewidth = 1) +
+  coord_sf(xlim = bb_suiattle[c("xmin", "xmax")], ylim = bb_suiattle[c("ymin", "ymax")], crs = 4326) +
+  labs(title = "District 2 (red) / corrected District 4 (blue) / original District 4 (gray) near the Suiattle glaciers") +
+  theme_minimal()
+```
+
+A second wedge, further south around 47.5N, looked just as large at first
+glance -- almost all of it turned out to be a false alarm: that area is
+already District 8's territory (just not plotted in the District 2/4
+comparison above), so there was nothing to fix there. But not quite all of
+it: the exact method also caught one small genuine sliver right at the
+District 2/4/8 corner (~1,900,000 sqm) that the eyeballed false alarm would
+have hidden completely -- exactly the kind of mistake that motivated
+computing the exact unclaimed area instead of estimating it.
+
+(Two earlier, weaker approaches were tried and dropped before landing on
+the exact method above. Buffering District 4's *whole* polygon outward and
+eroding it back entangled unrelated lake/glacier shoreline detail and
+produced spurious zigzags right in this area. A per-neighbor ribbon with a
+hand-picked tolerance did better, but every tolerance wide enough to
+bridge one gap either missed a narrower one nearby or started reaching
+into unrelated territory elsewhere -- which is what motivated computing
+the unclaimed area exactly, with nothing left to tune.)
+
+## The District 6 / District 8 report
+
+A later comment on the issue reported District 6 overlapping District 8,
+with the overlapping piece of District 6 non-contiguous from the rest of
+District 6. Checking directly against the current file finds no overlap
+between District 6 and District 8 at all:
+
+```{r}
+as.numeric(st_area(st_intersection(d6, d8)))
+```
+
+District 6 does have many disconnected parts (it's a Puget Sound district
+with many islands, so some fragmentation is expected), but none of them
+overlap District 8. This isn't reproducible against the current file, so
+it's left out of this patch -- it may have already been resolved by
+whatever produced the current file, or the report may have been against a
+stale copy of the data. If it recurs, it likely needs its own issue/patch
+rather than folding it in here.
+
+## Write out the corrected file
+
+```{r}
+unlink(GEOJSON_FILE)
+st_write(new_wa, GEOJSON_FILE, append = FALSE)
+```
