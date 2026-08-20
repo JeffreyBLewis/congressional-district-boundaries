@@ -125,9 +125,30 @@ neighbors_p <- st_union(c(d2p, d3p, d5p, d8p)) |> st_make_valid()
 # average width over the D2 boundary) without being so wide it starts
 # picking up unrelated detail.
 RIBBON_TOL <- 150
+
+# A per-boundary-point sample (see "Checking for any remaining gaps" below)
+# found the 150m ribbon leaves most of the boundary touching exactly, but
+# misses one substantially larger gap: a ~16,000,000 sqm wedge against
+# District 2 in the North Cascades (around the Suiattle/White Chuck/
+# Honeycomb glaciers, roughly 47.95-48.1N/121.25-121.0W) where District 4's
+# original line cuts a crude straight diagonal across terrain District 2's
+# line follows in real (glacier-boundary) detail. A single larger tolerance
+# isn't safe to apply everywhere (tried: it merges nearby islands into the
+# mainland and adds hundreds of sq km of unrelated area elsewhere), so it's
+# restricted to just this one identified zone.
+BIG_TOL <- 6000
+big_gap_zone <- st_bbox(c(xmin = -121.28, xmax = -120.98, ymin = 47.93, ymax = 48.13),
+                         crs = orig_crs) |> st_as_sfc() |> to_albers()
+
 ribbons <- lapply(list(d2p, d3p, d5p, d8p), function(nb) {
   near_d4 <- st_intersection(st_boundary(nb), st_buffer(d4p, RIBBON_TOL))
-  st_buffer(near_d4, RIBBON_TOL) |> st_make_valid()
+  r_small <- st_buffer(near_d4, RIBBON_TOL) |> st_make_valid()
+
+  near_d4_big <- st_intersection(st_boundary(nb), st_buffer(d4p, BIG_TOL))
+  r_big <- st_buffer(near_d4_big, BIG_TOL) |> st_make_valid()
+  r_big_restricted <- st_intersection(r_big, big_gap_zone) |> st_make_valid()
+
+  st_union(r_small, r_big_restricted) |> st_make_valid()
 })
 d4_filled <- st_union(d4p, st_union(do.call(c, ribbons))) |> st_make_valid()
 new_d4_geom <- st_difference(d4_filled, neighbors_p) |> st_make_valid()
@@ -172,22 +193,55 @@ sapply(c(2, 3, 5, 8), function(d) {
 })
 ```
 
-And, unlike a plain trim, the gaps along these same boundaries are now
-closed too -- checking within a 5m margin (tight enough that only a
-genuine unclosed gap would show up, not floating-point/reprojection noise)
-finds none of any consequence, versus tens to hundreds of thousands of
-square meters before fixing:
+### Checking for any remaining gaps
+
+Unlike overlap (a single `st_intersection` catches all of it, anywhere),
+checking for gaps needs care: a *narrow*-corridor check (buffer both
+boundaries by a few meters, look for unclaimed area in between) only
+catches gaps *narrower than the corridor* -- exactly the kind of check an
+earlier version of this patch used, and exactly why it wrongly reported
+success while two large gaps (one turning out to be a false alarm, one
+real -- see below) went undetected. A wide corridor has the opposite
+problem: it just accumulates area anywhere the two lines happen to run
+apart, including places that were never actually adjacent to begin with.
+
+The more reliable check: sample points along each neighbor's boundary near
+District 4, measure the distance from each to the new District 4 boundary,
+and -- critically -- confirm any large distance isn't simply because some
+*other* district already legitimately owns that spot (as turned out to be
+true of District 8, in the first large gap found below):
 
 ```{r}
-gap_area <- function(a, b, tol_m) {
-  a_p <- st_transform(a, WA_ALBERS); b_p <- st_transform(b, WA_ALBERS)
-  zone <- st_intersection(st_buffer(a_p, tol_m), st_buffer(b_p, tol_m))
-  as.numeric(st_area(st_difference(st_difference(zone, a_p), b_p)))
+#| warning: false
+new_d4_boundary_p <- st_boundary(st_geometry(new_d4) |> to_albers())
+all_claimed_p <- st_union(do.call(c, lapply(sort(unique(wa$district)), function(d) {
+  if (d == 4) to_albers(st_geometry(new_d4)) else to_albers(wa |> filter(district == d) |> st_geometry())
+}))) |> st_make_valid()
+
+find_gaps <- function(nb_p, near_tol = 10000, gap_tol = 300, step = 300) {
+  nb_lines <- st_cast(st_boundary(nb_p), "LINESTRING", warn = FALSE)
+  pts <- st_line_sample(nb_lines, density = 1 / step) |> st_cast("POINT")
+  near_pts <- pts[as.numeric(st_distance(pts, d4p)) < near_tol]
+  if (length(near_pts) == 0) return(tibble())
+  d <- as.numeric(st_distance(near_pts, new_d4_boundary_p))
+  keep <- which(d > gap_tol)
+  if (length(keep) == 0) return(tibble())
+  claimed <- st_intersects(near_pts[keep], all_claimed_p, sparse = FALSE)[, 1]
+  tibble(dist_m = d[keep], claimed = claimed)
 }
-sapply(c(2, 3, 5, 8), function(d) {
-  gap_area(st_geometry(new_d4), wa |> filter(district == d) |> st_geometry(), 5)
-})
+
+remaining <- map_dfr(list(d2 = d2p, d3 = d3p, d5 = d5p, d8 = d8p), find_gaps, .id = "neighbor") |>
+  filter(!claimed)
+nrow(remaining)
+max(remaining$dist_m)
 ```
+
+Every one of the remaining sample points (checked directly against an OSM
+basemap) sits right at 46.0N or 49.0N -- the Washington/Oregon and
+Washington/Canada state lines -- where District 5's or District 2's
+boundary runs *along the state border itself* rather than actually
+bordering District 4; District 4 legitimately doesn't reach those specific
+points, so a nonzero distance there is correct, not a bug.
 
 Area change is modest (net of overlap removed and gap filled) and every
 other district (including 2, 3, 5, and 8 themselves) is completely
@@ -288,6 +342,39 @@ ggplot() +
   labs(title = "District 2 (red) / corrected District 4 (blue) near Chickamin Glacier") +
   theme_minimal()
 ```
+
+The point-sampling check above was what actually caught the one place
+where that 150m ribbon wasn't enough: a ~16,000,000 sqm wedge against
+District 2 around the Suiattle/White Chuck/Honeycomb glaciers, where
+District 4's original line cut a crude straight diagonal across terrain
+District 2's line follows in real, glacier-by-glacier detail. Plotting
+both versions confirms it: the original line (gray dashed) ignores the
+glacier outlines entirely, while the corrected one (blue) now sits right
+on top of District 2's detailed line:
+
+```{r}
+#| message: false
+#| results: hide
+#| fig-width: 9
+#| fig-height: 7
+d4_orig_4326 <- st_transform(d4, 4326)
+
+bb_suiattle <- st_bbox(c(xmin = -121.28, xmax = -120.98, ymin = 47.93, ymax = 48.13), crs = 4326)
+ggplot() +
+  annotation_map_tile(type = "osm", zoomin = 0) +
+  geom_sf(data = d4_orig_4326, fill = NA, color = "gray40", linewidth = 0.8, linetype = "dashed") +
+  geom_sf(data = d2_4326, fill = NA, color = "red", linewidth = 1) +
+  geom_sf(data = new_d4_4326, fill = NA, color = "blue", linewidth = 1) +
+  coord_sf(xlim = bb_suiattle[c("xmin", "xmax")], ylim = bb_suiattle[c("ymin", "ymax")], crs = 4326) +
+  labs(title = "District 2 (red) / corrected District 4 (blue) / original District 4 (gray) near the Suiattle glaciers") +
+  theme_minimal()
+```
+
+A second wedge, further south around 47.5N, looked just as large at first
+-- but turned out to be a false alarm: that whole area is already District
+8's territory (just not plotted in the District 2/4 comparison above), so
+there was never anything to fix there. That's exactly the kind of mistake
+the "is it claimed by someone else" check above is designed to catch.
 
 (An earlier version of this fix closed gaps by buffering District 4's
 *whole* polygon outward and eroding it back -- a blunt instrument that,
