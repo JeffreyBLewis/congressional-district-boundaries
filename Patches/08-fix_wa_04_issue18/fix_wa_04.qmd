@@ -145,6 +145,36 @@ identical(
 )
 ```
 
+Re-plotting the same District 2/4 boundary zoom from above, but with the
+corrected District 4, shows the overlap ribbon is gone -- the blue line now
+runs cleanly alongside the red one instead of straddling it:
+
+```{r}
+#| fig-width: 6
+#| fig-height: 8
+new_overlap_24 <- st_intersection(d2, st_geometry(new_d4))
+
+ggplot() +
+  geom_sf(data = d2, fill = NA, color = "red") +
+  geom_sf(data = st_geometry(new_d4), fill = NA, color = "blue") +
+  coord_sf(xlim = st_bbox(st_buffer(overlap_24, 0.05))[c("xmin", "xmax")],
+           ylim = st_bbox(st_buffer(overlap_24, 0.05))[c("ymin", "ymax")]) +
+  labs(title = "Corrected: District 2 (red) / District 4 (blue), no more overlap") +
+  theme_minimal()
+```
+
+And the full corrected map, all eight districts:
+
+```{r}
+#| fig-width: 8
+#| fig-height: 8
+new_wa |>
+  ggplot() +
+  geom_sf(aes(fill = as.character(district))) +
+  labs(title = "Washington, 99th-102nd Congress (corrected)", fill = "District") +
+  theme_minimal()
+```
+
 ## The District 6 / District 8 report
 
 A later comment on the issue reported District 6 overlapping District 8,
