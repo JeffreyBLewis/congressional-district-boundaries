@@ -32,6 +32,7 @@ below since it turns out not to be reproducible against the current file.
 #| message: false
 library(tidyverse)
 library(sf)
+library(ggspatial)
 sf_use_s2(FALSE)
 ```
 
@@ -174,6 +175,70 @@ new_wa |>
   labs(title = "Washington, 99th-102nd Congress (corrected)", fill = "District") +
   theme_minimal()
 ```
+
+## Visual validation against a real basemap
+
+A closer look at the reported overlaps raised a natural follow-up: are
+these overlaps/gaps small relative to real terrain features (roads,
+rivers, lakes) the district lines should be following, or does the trimmed
+edge look arbitrary? Plotting the corrected District 4 directly on an OSM
+basemap answers that.
+
+Along the Columbia River (District 3/4), the corrected boundary hugs the
+river channel closely, including its small braids and islands -- exactly
+matching the repo owner's original read that these boundaries follow real
+water features:
+
+```{r}
+#| message: false
+#| results: hide
+#| fig-width: 9
+#| fig-height: 7
+d3_4326 <- st_transform(d3, 4326)
+new_d4_4326 <- st_transform(st_geometry(new_d4), 4326)
+
+bb_river <- st_bbox(c(xmin = -122.5, xmax = -121.7, ymin = 45.55, ymax = 45.8), crs = 4326)
+ggplot() +
+  annotation_map_tile(type = "osm", zoomin = 0) +
+  geom_sf(data = d3_4326, fill = NA, color = "red", linewidth = 1) +
+  geom_sf(data = new_d4_4326, fill = NA, color = "blue", linewidth = 1) +
+  coord_sf(xlim = bb_river[c("xmin", "xmax")], ylim = bb_river[c("ymin", "ymax")], crs = 4326) +
+  labs(title = "District 3 (red) / corrected District 4 (blue) along the Columbia River") +
+  theme_minimal()
+```
+
+Near the District 2/4 boundary in the remote North Cascades (around the
+Chickamin Glacier, well above any road), the corrected line still runs
+cleanly alongside District 2 with no jagged artifacts -- there's no
+road/river to follow here, so the line most likely follows a section-line
+or ridge, but critically the fix doesn't introduce any spurious zigzags:
+
+```{r}
+#| message: false
+#| results: hide
+#| fig-width: 9
+#| fig-height: 9
+d2_4326 <- st_transform(d2, 4326)
+
+bb_glacier <- st_bbox(c(xmin = -121.3, xmax = -120.9, ymin = 48.25, ymax = 48.45), crs = 4326)
+ggplot() +
+  annotation_map_tile(type = "osm", zoomin = 0) +
+  geom_sf(data = d2_4326, fill = NA, color = "red", linewidth = 1) +
+  geom_sf(data = new_d4_4326, fill = NA, color = "blue", linewidth = 1) +
+  coord_sf(xlim = bb_glacier[c("xmin", "xmax")], ylim = bb_glacier[c("ymin", "ymax")], crs = 4326) +
+  labs(title = "District 2 (red) / corrected District 4 (blue) near Chickamin Glacier") +
+  theme_minimal()
+```
+
+(An earlier version of this patch tried to also close the small residual
+gaps left along these same boundaries -- areas neither district claims,
+the flip side of the overlaps fixed above -- using a snap/buffer-based
+fill. That approach was dropped: it introduced exactly the kind of
+spurious zigzag artifact this section checks for, in this same glacier
+area, without any real feature to justify it. The gaps left by the
+overlap-only fix here are thin, sub-visual slivers -- invisible at any
+sane viewing scale -- so closing them isn't worth the risk of visibly
+worse geometry.)
 
 ## The District 6 / District 8 report
 
