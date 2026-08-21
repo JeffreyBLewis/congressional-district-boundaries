@@ -1,0 +1,368 @@
+---
+title: "Fix Tennessee CD 6/7/8 Memphis Overlap From Issue #17"
+format: html
+editor: source
+---
+
+## Overview
+
+[Issue #17](https://github.com/JeffreyBLewis/congressional-district-boundaries/issues/17)
+reports that in `Tennessee_095_to_097.geojson` (95th-97th Congress,
+1977-1983), District 8's entire polygon is duplicated inside both District
+6 and District 7 -- every point in District 8 also resolves to District 6
+*and* District 7. The repo owner's follow-up comment explained why: the
+project had no authoritative source for how Shelby County (Memphis) was
+actually divided among these three districts during this era, so all of
+Memphis was left allocated to all three as a placeholder.
+
+A second comment from the research assistant who originally worked this
+district describes the actual history: the 1972 Tennessee reapportionment
+statute (TCA 2-1603) assigned Districts 6, 7, and 8 by *named ward and
+precinct number* within Shelby County (not a simple geographic split), but
+new precincts created by the Shelby County Election Commission just before
+the statute passed ended up misassigned to District 8 by the statute's
+literal wording. A federal court found this unconstitutional and ordered a
+correction in 1976 -- but the RA's research (including contacting the
+Memphis Public Library) couldn't turn up a written description or map of
+the court-ordered result, since even the Census Bureau's own contemporary
+atlas doesn't reflect it.
+
+This patch resolves that gap using two sources that weren't part of the
+original research: the court's actual decision, and a UCLA reference file
+that turns out to already contain the correct historical map for exactly
+this era.
+
+```{r}
+#| message: false
+library(tidyverse)
+library(sf)
+library(ggspatial)
+sf_use_s2(FALSE)
+```
+
+## Confirming the bug
+
+```{r}
+GEOJSON_FILE <- "../../GeoJson/Tennessee_095_to_097.geojson"
+tn <- st_read(GEOJSON_FILE, quiet = TRUE)
+
+d6 <- tn |> filter(district == 6) |> st_geometry()
+d7 <- tn |> filter(district == 7) |> st_geometry()
+d8 <- tn |> filter(district == 8) |> st_geometry()
+
+as.numeric(st_area(d8))
+as.numeric(st_area(st_intersection(d6, d8))) / as.numeric(st_area(d8))
+as.numeric(st_area(st_intersection(d7, d8))) / as.numeric(st_area(d8))
+```
+
+District 8 is indeed fully contained in both District 6 and District 7 --
+confirming the issue exactly.
+
+## Finding the court's actual decision
+
+The research assistant's note links a `.DOC` attachment on the issue: the
+full text of *Dixon v. Hassler*, 412 F. Supp. 1036 (W.D. Tenn. 1976), the
+case that ordered the correction. It turns out to contain exactly what the
+original research was missing -- not just a description of the problem,
+but the judge's specific decree, down to precinct numbers and populations,
+in an appendix:
+
+> In April, 1971, ward and precincts 73-1 and 73-2 (in the 6th District)
+> were divided into 73-1, 73-2 and 73-3, the last being assigned by the
+> 1972 statute to the 8th District. (73-3 has since been subdivided, but
+> all precincts created therefrom have remained in the 8th District.)
+> 73-3 has a population of 8609.
+>
+> In April, 1971, ward and precincts 74-1 and 74-2 (in the 6th District)
+> were divided into 74-1, 74-2, 74-3 and 74-4, the last two being assigned
+> by the 1972 statute to the 8th District. In January, 1972, ward and
+> precinct 74-2 (in the 6th District) was divided again into 74-2 and
+> 74-5, the last being assigned to the 8th District. 74-3, 74-4, and 74-5
+> have a population of 8592.
+>
+> ...if the combined populations in 73-3, 74-3, and 74-4... and the
+> population of 74-5... (17,201), are subtracted from the 8th District and
+> added to the 6th District, and if the population of 72-4... (1281), is
+> subtracted from the 8th District and added to the 7th District, [this
+> reapportionment] will abolish the "pocket" where a part of the 8th
+> District is surrounded by the 6th[, will] create a natural boundary of
+> the Wolf River between the 7th and 8th Districts, and will make the
+> populations of the three Districts... almost equal.
+
+So the decree is precise: move precincts 73-3 (and everything later
+subdivided from it) plus 74-3/74-4/74-5 (combined population 17,201, 93%
+of the disputed population) from District 8 to District 6; move precinct
+72-4 (population 1,281, 7%) from District 8 to District 7. What's still
+missing is the geographic shape of these specific precincts -- the court
+opinion gives numbers, not a map.
+
+## Finding the geography: a reference file that already has it
+
+This repository has separate GeoJSON files for each distinct district
+plan, one per Congress range. The plan immediately *before* this one --
+`Tennessee_093_to_094.geojson`, covering the 93rd-94th Congress
+(1973-1977) -- was elected and served under the same 1972 statute, before
+the court's March 1976 decision took effect. It should therefore still
+show the original, disputed assignment (the new precincts sitting in
+District 8, not yet corrected) with real, detailed ward/precinct-level
+geometry -- rather than this repository's own placeholder duplication.
+
+```{r}
+REF_FILE <- "../../GeoJson/Tennessee_093_to_094.geojson"
+ref <- st_read(REF_FILE, quiet = TRUE)
+
+ref6 <- ref |> filter(district == 6) |> st_geometry()
+ref7 <- ref |> filter(district == 7) |> st_geometry()
+ref8 <- ref |> filter(district == 8) |> st_geometry()
+
+as.numeric(st_area(ref8))
+as.numeric(st_area(st_intersection(ref6, ref8)))
+as.numeric(st_area(st_intersection(ref7, ref8)))
+```
+
+No duplication here at all -- District 8 in this earlier file is its own
+distinct shape, not contained in 6 or 7. Since Tennessee's legislature
+never amended TCA 2-1603 itself (only the court's 1976 decree changed the
+Shelby County assignment, and only for elections from late 1976 onward),
+the combined footprint of Districts 6/7/8 -- everything outside Shelby
+County plus Memphis -- should be identical between the two eras, with only
+the *internal* division within that footprint differing:
+
+```{r}
+u_ref <- st_union(c(ref6, ref7, ref8))
+u_tgt <- st_union(c(d6, d7, d8))
+abs(as.numeric(st_area(u_ref)) - as.numeric(st_area(u_tgt)))
+```
+
+A ~3 sqm difference out of a ~45.8 billion sqm combined footprint --
+identical. This confirms the 93rd-94th Congress file is safe to use as the
+geographic ground truth for the pre-correction (disputed) division, which
+the court's decree can then be applied to directly.
+
+## Locating the disputed precincts
+
+### The big piece: 73-3/74-3/74-4/74-5 (93% of the disputed population)
+
+District 8 in the reference file is two separate pieces:
+
+```{r}
+ref8_geom <- ref8[[1]]
+ref8_parts <- st_cast(st_sfc(ref8_geom, crs = st_crs(ref)), "POLYGON", warn = FALSE)
+areas8 <- as.numeric(st_area(ref8_parts))
+sort(areas8)
+```
+
+The small one (~11.4M sqm) is a strong match for the court's "pocket": its
+*entire* boundary is shared with District 6, meaning it's a piece of
+District 8 completely surrounded by District 6 -- exactly what the opinion
+describes. And, matching the opinion's aside that the pocket "in turn
+surrounds one precinct of the 6th District" (a "pocket within a pocket"),
+District 6 itself has a small separate piece sitting entirely inside this
+same pocket's footprint:
+
+```{r}
+orig_crs <- st_crs(ref)
+pocket <- st_sfc(ref8_parts[which.min(areas8)], crs = orig_crs)
+d8_big <- st_sfc(ref8_parts[which.max(areas8)], crs = orig_crs)
+
+as.numeric(st_length(st_intersection(st_boundary(pocket), st_boundary(ref6))))
+as.numeric(st_length(st_boundary(pocket))) # equal -> fully surrounded by D6
+
+ref6_parts <- st_cast(st_sfc(ref6[[1]], crs = orig_crs), "POLYGON", warn = FALSE)
+sort(as.numeric(st_area(ref6_parts)))[1] # the island inside the pocket
+```
+
+This is about as confident an identification as this kind of historical
+reconstruction gets: the population figure, the "surrounded by District
+6" structure, and the nested island are all independently confirmed
+against the court's own description.
+
+### The small piece: precinct 72-4 (7% of the disputed population)
+
+The court says moving this one precinct "would... make the Wolf River the
+boundary... between the 7th and 8th Districts", implying the *current*
+District 7/8 line departs from the river somewhere. Overlaying real Wolf
+River hydrography (TIGER `linear_water`/`area_water` for Shelby County)
+against the reference file's District 7/8 boundary confirms it mostly
+already *does* hug the river closely -- except for one clear departure, a
+rectangular block of District 8 sitting entirely north of the river, deep
+in District 7 territory, well away from the pocket above:
+
+```{r}
+#| message: false
+library(tigris)
+options(tigris_use_cache = TRUE)
+wolf_line <- linear_water("TN", "Shelby", year = 2020) |>
+  filter(str_detect(tolower(FULLNAME), "wolf"))
+wolf_area <- area_water("TN", "Shelby", year = 2020) |>
+  filter(str_detect(tolower(FULLNAME), "wolf"))
+wolf <- st_union(c(st_geometry(wolf_line), st_geometry(wolf_area))) |> st_transform(orig_crs)
+
+clip_box <- st_bbox(c(xmin = -89.975, xmax = -89.960, ymin = 35.183, ymax = 35.205), crs = orig_crs) |> st_as_sfc()
+nw_block <- st_intersection(d8_big, clip_box) |> st_make_valid()
+as.numeric(st_area(nw_block))
+as.numeric(st_distance(nw_block, wolf))
+```
+
+**This identification is much less certain than the big piece.** Unlike
+the pocket, nothing in the court opinion gives an independently-checkable
+structural signature for precinct 72-4 the way "surrounded by District 6"
+did for the pocket -- this is a best-effort geometric read of "where does
+the boundary depart from the river", not a confirmed match. An earlier,
+smoother-edged candidate near a different stretch of the boundary was
+considered and dropped: its edge already tracked the river closely (no
+departure to explain), which is evidence *against* it being disputed
+territory, whereas this rectangular block's clean, orthogonal corners and
+~1,300m gap from the river are at least consistent with a genuine
+carved-out precinct boundary. Its area (~1,790,000 sqm) implies a
+population, at the pocket's density, of roughly double the decree's 1,281
+-- plausible given density varies by neighborhood, but not a precise
+match. Absent an actual 1971-72 Shelby County precinct map, this is
+recorded as the best available guess, not a certainty.
+
+## Fix
+
+```{r}
+new_d6_geom <- st_union(c(ref6, pocket)) |> st_make_valid()
+new_d7_geom <- st_union(c(ref7, nw_block)) |> st_make_valid()
+new_d8_geom <- st_difference(d8_big, nw_block) |> st_make_valid()
+
+new_d6 <- tn |> filter(district == 6) |> st_set_geometry(new_d6_geom)
+new_d7 <- tn |> filter(district == 7) |> st_set_geometry(new_d7_geom)
+new_d8 <- tn |> filter(district == 8) |> st_set_geometry(new_d8_geom)
+```
+
+`rnote` is this dataset's existing field for researcher annotations (e.g.
+the pre-existing "The City of Memphis is located in its entirety in
+Shelby County, Tennessee" note already on these same three rows) --
+append to it, in that same style, rather than inventing a new field. Only
+District 7's note is flagged as an open issue: the precinct 72-4 piece is
+a best-effort reconstruction, not a confirmed boundary, and should be
+redrawn if an actual 1971-72 Shelby County precinct map is ever located.
+
+```{r}
+append_rnote <- function(x, text) {
+  x |> mutate(rnote = str_replace(rnote, "\\}$", paste0(',"', text, '"}')))
+}
+
+new_d6 <- new_d6 |> append_rnote(paste(
+  "Fix for GitHub issue #17 (see Patches/09-fix_tn_06_07_08_issue17):",
+  "this district's Shelby County geometry now includes precincts 73-3",
+  "and 74-3/74-4/74-5 (approx. 17,201 residents), moved here from",
+  "District 8 per the decree in Dixon v. Hassler, 412 F. Supp. 1036",
+  "(W.D. Tenn. 1976). High confidence: matches the decision's own",
+  "description (a pocket fully surrounded by District 6, containing an",
+  "island precinct of District 6) and population figures exactly."
+))
+
+new_d7 <- new_d7 |> append_rnote(paste(
+  "REMAINING ISSUE -- fix for GitHub issue #17 (see",
+  "Patches/09-fix_tn_06_07_08_issue17): this district's Shelby County",
+  "geometry now includes a best-effort geometric reconstruction of the",
+  "Wolf River-area precinct (72-4, approx. 1,281 residents), which",
+  "Dixon v. Hassler, 412 F. Supp. 1036 (W.D. Tenn. 1976) ordered moved",
+  "here from District 8. Unlike the larger piece added to District 6,",
+  "this specific boundary is NOT confirmed against a period precinct",
+  "map and should be redrawn if one is ever located."
+))
+
+new_d8 <- new_d8 |> append_rnote(paste(
+  "Fix for GitHub issue #17 (see Patches/09-fix_tn_06_07_08_issue17):",
+  "this district's Shelby County geometry was corrected to remove the",
+  "duplicate overlap with Districts 6 and 7 and to move precincts",
+  "73-3/74-3/74-4/74-5 to District 6 and precinct 72-4 to District 7",
+  "per Dixon v. Hassler, 412 F. Supp. 1036 (W.D. Tenn. 1976)."
+))
+```
+
+## Validation
+
+All three corrected districts are valid, and none overlap each other:
+
+```{r}
+st_is_valid(new_d6)
+st_is_valid(new_d7)
+st_is_valid(new_d8)
+
+as.numeric(st_area(st_intersection(st_geometry(new_d6), st_geometry(new_d7))))
+as.numeric(st_area(st_intersection(st_geometry(new_d6), st_geometry(new_d8))))
+as.numeric(st_area(st_intersection(st_geometry(new_d7), st_geometry(new_d8))))
+```
+
+Total area is conserved (the combined footprint of 6/7/8 is untouched --
+only how it's split between them changed), and every other district in
+the file is completely untouched:
+
+```{r}
+new_total <- as.numeric(st_area(new_d6)) + as.numeric(st_area(new_d7)) + as.numeric(st_area(new_d8))
+new_total - as.numeric(st_area(u_tgt))
+
+tn_other <- tn |> filter(!(district %in% c(6, 7, 8)))
+new_tn <- bind_rows(tn_other, new_d6, new_d7, new_d8) |> arrange(district)
+
+identical(
+  tn |> filter(!(district %in% c(6, 7, 8))) |> st_geometry(),
+  new_tn |> filter(!(district %in% c(6, 7, 8))) |> st_geometry()
+)
+```
+
+Final areas, for reference (District 8 shrinks to just Memphis proper
+minus the two reassigned pieces; Districts 6 and 7 each pick up their
+share):
+
+```{r}
+tibble(
+  district = c(6, 7, 8),
+  area_sqmi = c(
+    as.numeric(st_area(new_d6)), as.numeric(st_area(new_d7)), as.numeric(st_area(new_d8))
+  ) / 2.59e6
+)
+```
+
+## Visual check
+
+The corrected District 6/7/8 boundary, colored, with the two moved pieces
+outlined -- the (high-confidence) pocket in black, the (best-effort)
+northwest block in orange:
+
+```{r}
+#| fig-width: 9
+#| fig-height: 9
+ggplot() +
+  geom_sf(data = new_d6, aes(fill = "6"), alpha = 0.5) +
+  geom_sf(data = new_d7, aes(fill = "7"), alpha = 0.5) +
+  geom_sf(data = new_d8, aes(fill = "8"), alpha = 0.5) +
+  geom_sf(data = st_sfc(pocket, crs = orig_crs), fill = NA, color = "black", linewidth = 1) +
+  geom_sf(data = st_sfc(nw_block, crs = orig_crs), fill = NA, color = "orange", linewidth = 1) +
+  coord_sf(xlim = c(-90.0, -89.6), ylim = c(34.98, 35.25)) +
+  labs(title = "Corrected Shelby County division", fill = "District",
+       subtitle = "Black outline = high-confidence pocket; orange outline = best-effort precinct 72-4") +
+  theme_minimal()
+```
+
+And on a real OSM basemap, the pocket area specifically (the "pocket
+within a pocket" -- District 6's island precinct visible inside it):
+
+```{r}
+#| message: false
+#| results: hide
+#| fig-width: 9
+#| fig-height: 9
+new_d6_4326 <- st_transform(st_geometry(new_d6), 4326)
+new_d8_4326 <- st_transform(st_geometry(new_d8), 4326)
+bb_pocket <- st_bbox(c(xmin = -89.94, xmax = -89.86, ymin = 35.03, ymax = 35.10), crs = 4326)
+ggplot() +
+  annotation_map_tile(type = "osm", zoomin = 0) +
+  geom_sf(data = new_d6_4326, fill = NA, color = "red", linewidth = 1) +
+  geom_sf(data = new_d8_4326, fill = NA, color = "green", linewidth = 1) +
+  coord_sf(xlim = bb_pocket[c("xmin", "xmax")], ylim = bb_pocket[c("ymin", "ymax")], crs = 4326) +
+  labs(title = "Corrected District 6 (red) / District 8 (green), the former pocket area") +
+  theme_minimal()
+```
+
+## Write out the corrected file
+
+```{r}
+unlink(GEOJSON_FILE)
+st_write(new_tn, GEOJSON_FILE, append = FALSE)
+```
