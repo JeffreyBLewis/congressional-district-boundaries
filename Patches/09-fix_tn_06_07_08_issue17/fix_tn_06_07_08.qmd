@@ -332,11 +332,59 @@ ggplot() +
   geom_sf(data = new_d6, aes(fill = "6"), alpha = 0.5) +
   geom_sf(data = new_d7, aes(fill = "7"), alpha = 0.5) +
   geom_sf(data = new_d8, aes(fill = "8"), alpha = 0.5) +
-  geom_sf(data = st_sfc(pocket, crs = orig_crs), fill = NA, color = "black", linewidth = 1) +
-  geom_sf(data = st_sfc(nw_block, crs = orig_crs), fill = NA, color = "orange", linewidth = 1) +
+  geom_sf(data = st_sfc(pocket, crs = orig_crs), fill = NA, color = "black", linewidth = 1.5) +
+  geom_sf(data = st_sfc(nw_block, crs = orig_crs), fill = NA, color = "orange", linewidth = 2.5) +
   coord_sf(xlim = c(-90.0, -89.6), ylim = c(34.98, 35.25)) +
   labs(title = "Corrected Shelby County division", fill = "District",
        subtitle = "Black outline = high-confidence pocket; orange outline = best-effort precinct 72-4") +
+  theme_minimal()
+```
+
+The same view on a real OSM basemap, so the corrected lines can be checked
+against actual Memphis geography (roads, the Mississippi River, city
+extent) rather than a blank background:
+
+```{r}
+#| message: false
+#| results: hide
+#| fig-width: 9
+#| fig-height: 9
+new_d6_4326_wide <- st_transform(st_geometry(new_d6), 4326)
+new_d7_4326_wide <- st_transform(st_geometry(new_d7), 4326)
+new_d8_4326_wide <- st_transform(st_geometry(new_d8), 4326)
+pocket_4326 <- st_transform(st_sfc(pocket, crs = orig_crs), 4326)
+nw_block_4326 <- st_transform(st_sfc(nw_block, crs = orig_crs), 4326)
+
+ggplot() +
+  annotation_map_tile(type = "osm", zoomin = 0) +
+  geom_sf(data = new_d6_4326_wide, fill = NA, color = "red", linewidth = 1.8) +
+  geom_sf(data = new_d7_4326_wide, fill = NA, color = "blue", linewidth = 1.8) +
+  geom_sf(data = new_d8_4326_wide, fill = NA, color = "purple", linewidth = 1.8) +
+  geom_sf(data = pocket_4326, fill = NA, color = "black", linewidth = 2) +
+  geom_sf(data = nw_block_4326, fill = NA, color = "orange", linewidth = 2.5) +
+  coord_sf(xlim = c(-90.0, -89.6), ylim = c(34.98, 35.25), crs = 4326, expand = FALSE) +
+  labs(title = "Corrected District 6 (red) / 7 (blue) / 8 (purple) on OSM",
+       subtitle = "Black outline = high-confidence pocket; orange outline = best-effort precinct 72-4 (see zoom below)") +
+  theme_minimal()
+```
+
+The northwest block (precinct 72-4 candidate) specifically, zoomed in --
+the small rectangle in the middle is the piece moved from District 8
+(purple) to District 7 (blue):
+
+```{r}
+#| message: false
+#| results: hide
+#| fig-width: 9
+#| fig-height: 9
+bb_nw <- st_bbox(c(xmin = -89.985, xmax = -89.955, ymin = 35.178, ymax = 35.208), crs = 4326)
+ggplot() +
+  annotation_map_tile(type = "osm", zoomin = 0) +
+  geom_sf(data = new_d7_4326_wide, fill = NA, color = "blue", linewidth = 2) +
+  geom_sf(data = new_d8_4326_wide, fill = NA, color = "purple", linewidth = 2) +
+  geom_sf(data = nw_block_4326, fill = NA, color = "orange", linewidth = 2.5) +
+  coord_sf(xlim = bb_nw[c("xmin", "xmax")], ylim = bb_nw[c("ymin", "ymax")], crs = 4326, expand = FALSE) +
+  labs(title = "District 7 (blue) / District 8 (purple), best-effort precinct 72-4 (orange)") +
   theme_minimal()
 ```
 
@@ -353,10 +401,11 @@ new_d8_4326 <- st_transform(st_geometry(new_d8), 4326)
 bb_pocket <- st_bbox(c(xmin = -89.94, xmax = -89.86, ymin = 35.03, ymax = 35.10), crs = 4326)
 ggplot() +
   annotation_map_tile(type = "osm", zoomin = 0) +
-  geom_sf(data = new_d6_4326, fill = NA, color = "red", linewidth = 1) +
-  geom_sf(data = new_d8_4326, fill = NA, color = "green", linewidth = 1) +
-  coord_sf(xlim = bb_pocket[c("xmin", "xmax")], ylim = bb_pocket[c("ymin", "ymax")], crs = 4326) +
-  labs(title = "Corrected District 6 (red) / District 8 (green), the former pocket area") +
+  geom_sf(data = new_d6_4326, fill = NA, color = "red", linewidth = 2.5) +
+  geom_sf(data = new_d8_4326, fill = NA, color = "purple", linewidth = 2.5) +
+  coord_sf(xlim = bb_pocket[c("xmin", "xmax")], ylim = bb_pocket[c("ymin", "ymax")], crs = 4326, expand = FALSE) +
+  labs(title = "Corrected District 6 (red) / District 8 (purple), the former pocket area",
+       subtitle = "The two colors share this exact boundary, so only the top line (purple) is visible") +
   theme_minimal()
 ```
 
