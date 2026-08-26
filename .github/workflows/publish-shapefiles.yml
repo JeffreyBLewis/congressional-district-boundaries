@@ -1,0 +1,45 @@
+name: Publish shapefiles
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - "GeoJson/**"
+  workflow_dispatch: {}
+
+concurrency:
+  group: publish-shapefiles
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    container: rocker/geospatial:latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends zip
+
+      - name: Install R package dependencies
+        run: Rscript -e 'install.packages("targets", repos = "https://cloud.r-project.org")'
+
+      - name: Build shapefiles from GeoJSON
+        run: Rscript -e 'targets::tar_make()'
+
+      - name: Publish release with shapefile assets
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest-shapefiles
+          name: Shapefiles (auto-updated)
+          body: |
+            Shapefiles regenerated from `GeoJson/` at commit ${{ github.sha }}.
+            Each zip contains a VERSION.txt recording the exact source commit.
+            This release is overwritten automatically whenever GeoJson/ changes on master.
+          files: ShapeFiles/districts*.zip
