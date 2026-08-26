@@ -1,0 +1,207 @@
+---
+title: "Fix a Census Cartographic Error in VA CD1/CD3 From Issue #20"
+format: html
+editor: source
+---
+
+## Overview
+
+[Issue #20](https://github.com/JeffreyBLewis/congressional-district-boundaries/issues/20)
+reports that Virginia's 103rd-Congress shapefile (`Virginia_103_to_103.geojson`)
+disagrees with the 104th/105th-Congress shapefile (`Virginia_104_to_105.geojson`)
+along the District 1 / District 3 boundary, in the Middle Peninsula near Essex
+County.
+
+Three independent lines of evidence show this is a Census cartographic error in
+the 104th/105th-vintage file, not a real mid-decade redistricting:
+
+1. **No enacting law exists.** Former Va. Code &sect; 24.2-302 (the statute
+   defining VA's congressional districts) shows no amendment between the 1991
+   creation of this map and the court-ordered 1998 redraw. The only citation in
+   that window, `Acts 1993, c. 641`, is the wholesale recodification of Title
+   24.1 into Title 24.2 -- a renumbering exercise, not a boundary change.
+2. **The court record confirms it.** *Moon v. Meadows*, 952 F. Supp. 1141
+   (E.D. Va. 1997) -- the case that eventually forced the redraw -- was decided
+   in February 1997, after the 104th Congress was already elected, and the new
+   map wasn't signed into law until February 1998 (taking effect for the 1998
+   election, the 106th Congress).
+3. **A period map confirms which side is right.** VPAP's history of the
+   district ([vpap.org](https://www.vpap.org/updates/1996-3rd-district-brief-history/))
+   includes actual maps of the district as enacted in 1992 and as redrawn in
+   1998. The 1992 map has a narrow spike reaching north into the Middle
+   Peninsula that is absent from the 1998 map -- i.e., that piece was part of
+   District 3 continuously from 1992 through the 1996 election, and was only
+   cut loose by the real 1998 redraw, two years after Census's 104th-vintage
+   file had already (incorrectly) dropped it.
+
+```{r}
+#| message: false
+library(tidyverse)
+library(sf)
+sf_use_s2(FALSE)
+```
+
+## Confirming the bug
+
+```{r}
+d103 <- st_read("../../GeoJson/Virginia_103_to_103.geojson", quiet = TRUE)
+d104 <- st_read("../../GeoJson/Virginia_104_to_105.geojson", quiet = TRUE)
+
+pchng <- function(g1, g2) as.numeric(st_area(st_intersection(g1, g2))) /
+  as.numeric(st_area(st_union(g1, g2)))
+
+overlaps <- map_dbl(sort(d103$district), function(dist) {
+  g1 <- d103 |> filter(district == dist) |> st_geometry()
+  g2 <- d104 |> filter(district == dist) |> st_geometry()
+  pchng(g1, g2)
+})
+tibble(district = sort(d103$district), overlap_103_vs_104 = overlaps)
+```
+
+Only Districts 1 and 3 actually differ (overlap well below 1); every other
+district is unchanged. This project's own file-writing step groups an entire
+state's districts by a shared `(startcong, endcong)` range, so a real change in
+even one district splits the whole state's file at that Congress -- which is
+why all 11 districts, not just 1 and 3, ended up in a standalone
+`Virginia_103_to_103.geojson`.
+
+## Establishing ground truth from Census's own raw historical shapefiles
+
+Both existing files were built from "US Census website" data (see their `note`
+field). To check them against an independent source, this pulls Census's own
+raw historical congressional district shapefiles directly -- the same
+`PREVGENZ` series the repo owner referenced when investigating this issue --
+for Virginia (state FIPS 51), the 103rd, 104th, and 105th Congresses:
+
+```{r}
+#| message: false
+BASE_URL <- "https://www2.census.gov/geo/tiger/PREVGENZ/cd"
+
+load_prevgenz_va <- function(cong) {
+  zip_url <- sprintf("%s/cd%dshp/cd51_%d_shp.zip", BASE_URL, cong, cong)
+  td <- tempfile()
+  dir.create(td)
+  zipfn <- file.path(td, "va.zip")
+  download.file(zip_url, zipfn, quiet = TRUE)
+  unzip(zipfn, exdir = td)
+  shpfn <- list.files(td, pattern = "\\.shp$", full.names = TRUE)
+  st_read(shpfn, quiet = TRUE) |>
+    st_set_crs(4269) |>
+    group_by(CD) |>
+    summarize(geometry = st_union(geometry), .groups = "drop") |>
+    transmute(district = as.numeric(CD), startcong = cong, endcong = cong,
+              geometry = geometry)
+}
+
+prevgenz <- map(c(103, 104, 105), load_prevgenz_va) |> list_rbind() |> st_as_sf()
+```
+
+```{r}
+detail <- prevgenz |>
+  arrange(district, startcong) |>
+  mutate(pchng = map2_dbl(geometry, lag(geometry),
+                           \(g1, g2) if (is.null(g2)) NA else pchng(g1, g2)),
+         .by = district)
+st_drop_geometry(detail)[, c("district", "startcong", "endcong", "pchng")]
+```
+
+This independently confirms the same pattern: Districts 1 and 3 change between
+103 and 104 (overlap 0.94 and 0.89); every other district is stable across all
+three Congresses (104-to-105 overlap is 1.0 everywhere, confirming those two
+years are identical). No district changes again between 104 and 105, matching
+the fact that the real redraw didn't happen until 1998.
+
+## Locating and checking the disputed area
+
+```{r}
+cd3_103 <- prevgenz |> filter(district == 3, startcong == 103) |> st_geometry()
+cd3_104 <- prevgenz |> filter(district == 3, startcong == 104) |> st_geometry()
+
+lost <- st_difference(cd3_103, cd3_104) |> st_cast("POLYGON")
+areas <- as.numeric(st_area(lost))
+main_piece <- lost[[which.max(areas)]]
+st_coordinates(st_centroid(st_sfc(main_piece, crs = 4269)))
+```
+
+The dominant piece Census's 104th-vintage file drops from District 3 (about
+560 million square meters, ~216 sq mi) is centered in Essex County, on the
+Middle Peninsula -- exactly the "north to the middle peninsula" leg of
+District 3's documented "winding path from Richmond ... to Norfolk"
+([VPAP](https://www.vpap.org/updates/1996-3rd-district-brief-history/)), and
+exactly where the 1992-vs-1998 map comparison shows the district's boundary
+actually changing.
+
+## Fix
+
+Districts 1 and 3 take their 103rd-Congress (accurate) geometry, extended
+through the 105th Congress; every other district keeps its existing
+104th/105th-Congress geometry (already correct, and closer to current
+practice). The result replaces the incorrect three-way split with a single
+continuous 103rd-105th Congress file.
+
+```{r}
+append_rnote <- function(x, text) {
+  x |> mutate(rnote = if_else(
+    rnote == "",
+    sprintf('{"%s"}', text),
+    str_replace(rnote, "\\}$", paste0(',"', text, '"}'))
+  ))
+}
+
+correction_note <- paste(
+  "Fix for GitHub issue #20 (see Patches/11-fix_va_01_03_issue20): Census's",
+  "104th/105th-Congress vintage shapefile incorrectly dropped a ~216 sq mi",
+  "Middle Peninsula/Essex County piece from this district into District 1.",
+  "No Virginia law changed the 3rd District's boundaries between the 1992",
+  "and 1998 elections (Moon v. Meadows, 952 F. Supp. 1141 (E.D. Va. 1997),",
+  "wasn't decided until Feb. 1997 and the redraw wasn't signed until Feb.",
+  "1998); VPAP's 1992 and 1998 district maps confirm this piece was part of",
+  "District 3 throughout 1992-1996 and only removed by the real 1998 redraw.",
+  "Geometry for Districts 1 and 3 in this range now uses the 103rd-Congress",
+  "vintage, which matches the historical record."
+)
+
+fixed_1_3 <- d103 |>
+  filter(district %in% c(1, 3)) |>
+  mutate(startcong = 103, endcong = 105) |>
+  append_rnote(correction_note)
+
+fixed_rest <- d104 |>
+  filter(!district %in% c(1, 3)) |>
+  mutate(startcong = 103, endcong = 105)
+
+new_va <- bind_rows(fixed_1_3, fixed_rest) |>
+  mutate(id = sprintf("%03i%03i%03i%03i", 51, startcong, endcong, district)) |>
+  arrange(district)
+```
+
+## Validate
+
+```{r}
+st_drop_geometry(new_va)[, c("district", "startcong", "endcong", "id")]
+all(st_is_valid(new_va))
+
+# no overlaps between any two districts
+combos <- combn(nrow(new_va), 2)
+max(map_dbl(seq_len(ncol(combos)), function(i) {
+  a <- new_va[combos[1, i], ] |> st_geometry()
+  b <- new_va[combos[2, i], ] |> st_geometry()
+  sum(as.numeric(st_area(st_intersection(a, b))))
+}))
+
+# total area roughly conserved relative to the 104-105 file it mostly replaces
+sum(as.numeric(st_area(new_va)))
+sum(as.numeric(st_area(d104)))
+```
+
+Eleven districts, no invalid geometry, no pairwise overlap, and total area
+essentially unchanged (the Essex County piece simply moves from District 1
+back to District 3).
+
+## Write out the corrected file
+
+```{r}
+unlink("../../GeoJson/Virginia_103_to_103.geojson")
+unlink("../../GeoJson/Virginia_104_to_105.geojson")
+st_write(new_va, "../../GeoJson/Virginia_103_to_105.geojson", append = FALSE)
+```
