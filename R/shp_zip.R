@@ -48,6 +48,7 @@ write_shp_zip <- function(sf, zipfn, .path = "districtShapes") {
   st_write(sf, file.path(td, shpfn))
   write_version_txt(td)
   print(list.files(file.path(td)))
+  dir.create(dirname(zipfn), showWarnings = FALSE, recursive = TRUE)
   zip(zipfile = zipfn, files = td, flags = "-rj9X")
 }
 
