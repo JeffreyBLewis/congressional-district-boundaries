@@ -1,0 +1,157 @@
+---
+title: "Revert an Unsupported Rhode Island Congress Split From Issue #19"
+format: html
+editor: source
+---
+
+## Overview
+
+[Issue #19](https://github.com/JeffreyBLewis/congressional-district-boundaries/issues/19)
+reported that Rhode Island's 114th- and 115th-Congress shapefiles disagreed
+noticeably north of Providence, even though Census's own redistricting
+page shows Rhode Island was *not* one of the states redistricted between
+those two Congresses. Follow-up investigation on the issue concluded this
+was a data artifact in this repository's original (2016-vintage) pull for
+the 113th-114th Congress range, not a real boundary change -- current
+Census data matches `Rhode Island_113_to_114.geojson` closely for the rest
+of the period.
+
+That conclusion was implemented in commit `b89f2bd` (PR #21, "Fix ri",
+merged 2026-06-19), which added two new files,
+`Rhode Island_113_to_117.geojson` and `Rhode Island_118_to_119.geojson`,
+apparently intending to also split off a second, smaller change between
+the 117th and 118th Congress. But it never removed the two files it was
+meant to replace (`Rhode Island_113_to_114.geojson` and
+`Rhode Island_115_to_119.geojson`), and the new files were written with
+raw Census/tigris column names (`STATEFP`, `CD119FP`, `STARTCONG`
+uppercase, etc.) instead of this repository's canonical schema
+(`statename`, `district`, `startcong`, `endcong`, `id`, ...). The result:
+Rhode Island has had four overlapping, duplicate-coverage files sitting in
+`GeoJson/` since June, two of which are missing the columns the rest of
+the pipeline depends on -- which is what surfaced this while testing an
+unrelated shapefile-export workflow.
+
+```{r}
+#| message: false
+library(tidyverse)
+library(sf)
+library(tigris)
+options(tigris_use_cache = TRUE)
+source("../../R/dedup.R")
+```
+
+## Confirming the schema break
+
+```{r}
+bad1 <- st_read("../../GeoJson/Rhode Island_113_to_117.geojson", quiet = TRUE)
+bad2 <- st_read("../../GeoJson/Rhode Island_118_to_119.geojson", quiet = TRUE)
+names(bad1)
+names(bad2)
+```
+
+Neither has a `statename`, `startcong`, or `endcong` column in the
+lowercase form every other file in this collection uses -- `bad1` has no
+Congress-range columns at all. Loading the full collection this way is
+exactly what makes `1:max(congressional_district_sf$endcong)` in
+`_targets.R` fail with `NA/NaN argument`: these four rows contribute `NA`
+to `endcong`.
+
+## Checking whether the 117th-118th split is real
+
+`R/dedup.R`'s `dedup_districts()` is this project's own, already-validated
+rule for exactly this question: it merges consecutive Congresses for a
+district into one shape whenever consecutive-vintage geometries overlap
+90%+ -- more precisely, at or above a 0.99 intersection-over-union
+threshold -- and keeps a break only when overlap drops below that. It's
+the same rule that built the rest of the collection. Reapplying it here
+with fresh data settles the question directly instead of relying on
+memory of what the original PR compared.
+
+```{r}
+#| message: false
+#| results: hide
+baseline <- st_read("../../GeoJson/Rhode Island_113_to_114.geojson", quiet = TRUE) |>
+  st_transform(4269) |>
+  transmute(STATENAME = statename, DISTRICT = as.character(district),
+            STARTCONG = 113, ENDCONG = 114, NOTE = note, geometry = geometry)
+
+pull_year <- function(year, cong) {
+  d <- congressional_districts(year = year, cb = TRUE, resolution = "500k", state = "44")
+  cn <- grep("^CD[0-9]+FP$", names(d), value = TRUE)[1]
+  d |> st_transform(4269) |>
+    transmute(STATENAME = "Rhode Island", DISTRICT = .data[[cn]],
+              STARTCONG = cong, ENDCONG = cong,
+              NOTE = sprintf("From `tigris` using year = %d.", year),
+              geometry = geometry)
+}
+
+all_ri <- bind_rows(
+  baseline,
+  pull_year(2017, 115),
+  pull_year(2019, 116),
+  pull_year(2019, 117),
+  pull_year(2022, 118),
+  pull_year(2024, 119)
+) |>
+  mutate(DISTRICT = as.numeric(DISTRICT))
+```
+
+```{r}
+detail <- all_ri |>
+  arrange(STATENAME, DISTRICT, STARTCONG) |>
+  mutate(pchng = map2_dbl(geometry, lag(geometry),
+                           \(g1, g2) if (is.null(g2)) NA else
+                             as.numeric(st_area(st_intersection(g1, g2))) /
+                             as.numeric(st_area(st_union(g1, g2)))),
+         .by = c(STATENAME, DISTRICT))
+st_drop_geometry(detail)[, c("DISTRICT", "STARTCONG", "ENDCONG", "pchng")]
+```
+
+The only transition below the 0.99 threshold is 113/114 &rarr; 115 (0.968
+for District 1) -- the artifact issue #19 already identified. Every other
+transition, including 117 &rarr; 118 (0.994 and 0.999), stays above it.
+Running the collection's own merge rule on this confirms it directly:
+
+```{r}
+result <- dedup_districts(all_ri, .thresh = 0.99)
+st_drop_geometry(result)[, c("STATENAME", "DISTRICT", "STARTCONG", "ENDCONG")]
+```
+
+Two ranges fall out: 113-114 and 115-119 -- exactly what
+`Rhode Island_113_to_114.geojson` and `Rhode Island_115_to_119.geojson`
+already encode. There is no support for a break at 117/118. (As a further
+check, the geometry actually written into `Rhode Island_113_to_117.geojson`
+and `Rhode Island_118_to_119.geojson` turns out to be identical between
+the two files to begin with -- consistent with there being no real change
+between them, but then there was no reason to split them into two files
+at all.)
+
+## Fix
+
+The two files being replaced by `b89f2bd` were never removed, and the two
+that replaced them don't match this repository's schema or its own
+change-detection rule. The fix is to remove the two later files and keep
+the originals, which is what the data already supports.
+
+```{r}
+file.remove("../../GeoJson/Rhode Island_113_to_117.geojson")
+file.remove("../../GeoJson/Rhode Island_118_to_119.geojson")
+```
+
+## Validate
+
+```{r}
+files <- list.files("../../GeoJson", pattern = "Rhode Island", full.names = TRUE)
+basename(files)
+
+ri_check <- st_read("../../GeoJson/Rhode Island_113_to_114.geojson", quiet = TRUE) |>
+  bind_rows(st_read("../../GeoJson/Rhode Island_115_to_119.geojson", quiet = TRUE))
+st_drop_geometry(ri_check)[, c("statename", "district", "startcong", "endcong")]
+all(st_is_valid(ri_check))
+```
+
+Rhode Island is back to two files, both with the canonical schema, and
+together they cover the 113th through 119th Congress with no gaps or
+overlaps. The pipeline's `congresses <- 1:max(congressional_district_sf$endcong)`
+step, which failed on the stray `NA`s from the malformed files, now has
+none to trip over.
