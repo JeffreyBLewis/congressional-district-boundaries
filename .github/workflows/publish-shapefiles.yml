@@ -33,13 +33,47 @@ jobs:
       - name: Build shapefiles from GeoJSON
         run: Rscript -e 'targets::tar_make()'
 
-      - name: Publish release with shapefile assets
+      - name: Compute next dataset version
+        id: version
+        run: |
+          DATE_VERSION="v$(date -u +%Y.%m.%d)"
+          EXISTING=$(git ls-remote --tags origin "refs/tags/${DATE_VERSION}*" | sed 's#.*refs/tags/##' | sort -V)
+          if [ -z "$EXISTING" ]; then
+            VERSION="$DATE_VERSION"
+          else
+            LAST=$(echo "$EXISTING" | tail -1)
+            if [ "$LAST" = "$DATE_VERSION" ]; then
+              N=2
+            else
+              N=$(( $(echo "$LAST" | sed "s/^${DATE_VERSION}\.//") + 1 ))
+            fi
+            VERSION="${DATE_VERSION}.${N}"
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Publish versioned release with shapefile assets
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.version }}
+          name: "Shapefiles ${{ steps.version.outputs.version }}"
+          body: |
+            Shapefiles regenerated from `GeoJson/` at commit ${{ github.sha }}.
+            Each zip contains a VERSION.txt recording the exact source commit.
+            This is a permanent, versioned snapshot -- it is never overwritten.
+            For a stable link that always points at the current data, use the
+            `latest-shapefiles` release instead.
+          files: ShapeFiles/districts*.zip
+
+      - name: Publish rolling "latest" release with shapefile assets
         uses: softprops/action-gh-release@v2
         with:
           tag_name: latest-shapefiles
           name: Shapefiles (auto-updated)
           body: |
-            Shapefiles regenerated from `GeoJson/` at commit ${{ github.sha }}.
+            Shapefiles regenerated from `GeoJson/` at commit ${{ github.sha }}
+            (dataset version ${{ steps.version.outputs.version }}).
             Each zip contains a VERSION.txt recording the exact source commit.
-            This release is overwritten automatically whenever GeoJson/ changes on master.
+            This release is overwritten automatically whenever GeoJson/ changes
+            on master. For a permanent snapshot of this exact version, see the
+            `${{ steps.version.outputs.version }}` release instead.
           files: ShapeFiles/districts*.zip
