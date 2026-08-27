@@ -56,7 +56,7 @@ jobs:
           git tag "$VERSION" "${{ github.sha }}"
           git push origin "$VERSION"
 
-      - name: Publish rolling "latest" release with shapefile assets
+      - name: Create/update the rolling "latest" release (no assets yet)
         uses: softprops/action-gh-release@v2
         with:
           tag_name: latest-shapefiles
@@ -70,4 +70,50 @@ jobs:
             `${{ steps.version.outputs.version }}` for reference, but no
             separate asset archive is kept per version -- check out that tag
             and rebuild via `targets::tar_make()` to reproduce it exactly.
-          files: ShapeFiles/districts*.zip
+
+      - name: Split shapefiles into upload batches
+        run: |
+          mkdir -p ShapeFiles/batch1 ShapeFiles/batch2 ShapeFiles/batch3 ShapeFiles/batch4
+          i=0
+          for f in ShapeFiles/districts*.zip; do
+            batch=$(( (i % 4) + 1 ))
+            mv "$f" "ShapeFiles/batch${batch}/"
+            i=$((i + 1))
+          done
+
+      # GitHub's API applies a secondary rate limit to bursts of asset
+      # uploads; uploading all ~119 zips in one shot intermittently trips it.
+      # Uploading in smaller batches with a pause between each keeps every
+      # individual burst well under that limit.
+      - name: Upload shapefile batch 1/4
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest-shapefiles
+          files: ShapeFiles/batch1/*.zip
+
+      - name: Pause between batches
+        run: sleep 30
+
+      - name: Upload shapefile batch 2/4
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest-shapefiles
+          files: ShapeFiles/batch2/*.zip
+
+      - name: Pause between batches
+        run: sleep 30
+
+      - name: Upload shapefile batch 3/4
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest-shapefiles
+          files: ShapeFiles/batch3/*.zip
+
+      - name: Pause between batches
+        run: sleep 30
+
+      - name: Upload shapefile batch 4/4
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest-shapefiles
+          files: ShapeFiles/batch4/*.zip
