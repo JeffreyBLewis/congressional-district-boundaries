@@ -25,7 +25,7 @@ representation of the data that we will be updating moving forward (the
 project had previously been managed in PostGIS).  The shapefiles presented
 on the website are now generated from the GeoJSON here.  
 
-Updates and maintenance of the collection moving forward uses the`targets` 
+Updates and maintenance of the collection moving forward use the`targets` 
 workflow manager in `R` and a simple patching system.  All of the
 code used is provided in this repository.
 
@@ -83,20 +83,20 @@ unprojected format using the NAD83 coordinate datum (PostGIS SRID
 Download
 
 The files provide district shapes for each Congress in ERSI's
-Shapefile format. The current files are version 1.00 (June 20, 2013).
+Shapefile format. 
 
 
 Documentation
 =============
 
 Our enumeration of Congressional districts in effect in a particular
-Congress follows Martis. At large districts are numbered "0". In a few
+Congress follows Martis. At-large districts are numbered "0". In a few
 cases, shapes describing Indian territories within states during the
-18th and early 19th centuries are included in the shape files. These
+18th and early 19th centuries are included in the shapefiles. These
 territories are always assigned district number "-1". The
-Congressional districts in the shape files match districts contained
+Congressional districts in the shapefiles match districts contained
 in rollcall voting data files and Congressional roster files available
-on Keith Poole's Voteview site here and here. There are a very few
+on Keith Poole's Voteview site here and here. There are a few
 instances in which there is no member representing a particular
 district in a particular Congress (a file enumerating all known
 discrepancies between the Voteview data and these shapes is available
@@ -110,7 +110,7 @@ Decennial Census were used to construct districts from the 98th to the
 below). For Congresses between the 1st and the 97th, district
 boundaries were formed in one of two ways. For districts that were
 made up of collections of complete counties, historical county
-boundaries from NHGIS or were dissolved to form district
+boundaries from NHGIS were dissolved to form district
 boundaries. Districts that divided one or more counties were formed on
 a case-by-case basis. Sources relied upon for these districts are
 described in the documentation files below.
