@@ -1,0 +1,290 @@
+---
+title: "Merge Census Line-Vintage Splits in NJ (103rd-107th) and TX (105th-107th) From Issue #36"
+format: html
+editor: source
+---
+
+## Overview
+
+[Issue #36](https://github.com/JeffreyBLewis/congressional-district-boundaries/issues/36)
+asks about two apparent mid-cycle boundary changes in this collection for
+which no redistricting is documented anywhere:
+
+- New Jersey between the 105th and 106th Congress
+  (`New Jersey_103_to_105.geojson` vs. `New Jersey_106_to_107.geojson`), and
+- Texas between the 106th and 107th Congress
+  (`Texas_105_to_106.geojson` vs. `Texas_107_to_107.geojson`).
+
+Neither is a real change of plan. Starting with the 103rd Congress this
+collection takes its shapes directly from the Census Bureau's congressional
+district files, and between these Congresses the Census re-digitized the
+underlying TIGER line work (and realigned coastlines and state lines). The
+original project database kept a separate per-Congress shape whenever the
+Census file changed at all, and `R/dedup.R`'s 0.99 intersection-over-union
+merge rule did not re-join them, because the sliver differences push the
+small urban districts (NJ District 13, TX Districts 6, 18, and 20) just
+under 0.99.
+
+The historical record agrees:
+
+- Census's own documentation of the 106th Congress files lists only New
+  York, North Carolina, and Virginia as having redistricted for the 106th
+  Congress; the 103rd-Congress districts otherwise stayed in effect through
+  Census 2000.
+- Texas's legislature never replaced the 1996 interim plan drawn in
+  *Vera v. Bush*; when it missed the court's June 30, 1997 deadline, the
+  court left the interim plan in place indefinitely (*Vera v. Bush*,
+  980 F. Supp. 251 (S.D. Tex. 1997)), so the plan used for the 1996
+  election was also used in 1998 and 2000.
+
+This patch documents the evidence and then merges each pair into a single
+file: `New Jersey_103_to_107.geojson` and `Texas_105_to_107.geojson`.
+
+```{r}
+#| message: false
+library(tidyverse)
+library(sf)
+sf_use_s2(FALSE)
+```
+
+```{r}
+read_cd <- function(fn) {
+  st_read(file.path("../../GeoJson", fn), quiet = TRUE) |>
+    mutate(district = as.integer(district)) |>
+    arrange(district)
+}
+nj_a <- read_cd("New Jersey_103_to_105.geojson")
+nj_b <- read_cd("New Jersey_106_to_107.geojson")
+tx_a <- read_cd("Texas_105_to_106.geojson")
+tx_b <- read_cd("Texas_107_to_107.geojson")
+```
+
+## Characterizing the differences
+
+A real redistricting moves whole blocks or precincts between a handful of
+districts and leaves the rest untouched. A change of line vintage instead
+produces thin slivers along *every* boundary of *every* district. For each
+district we compute the intersection-over-union of the two vintages, the
+area of their symmetric difference, the mean width of that symmetric
+difference (its area divided by the district's perimeter), the number of
+separate pieces it breaks into, and the largest single piece that is not
+simply a change in the state's outline (coastline or state line).
+
+```{r}
+EA <- 5070  # USA Contiguous Albers Equal Area, for areas and lengths in m
+
+compare_vintages <- function(a, b) {
+  a <- st_transform(st_make_valid(a), EA)
+  b <- st_transform(st_make_valid(b), EA)
+  outline_change <- st_sym_difference(st_union(a), st_union(b))
+  # st_make_valid can return a GEOMETRYCOLLECTION; keep only the polygon parts
+  to_poly <- function(g) {
+    if (st_geometry_type(g) == "GEOMETRYCOLLECTION") st_union(st_collection_extract(g, "POLYGON")) else g
+  }
+  map_dfr(a$district, function(d) {
+    ga <- to_poly(st_geometry(a)[a$district == d])
+    gb <- to_poly(st_geometry(b)[b$district == d])
+    sd <- st_union(st_sym_difference(ga, gb))
+    internal <- if (length(outline_change) && !all(st_is_empty(outline_change))) {
+      st_union(st_difference(sd, outline_change))
+    } else sd
+    pieces <- if (length(internal) == 1 && !st_is_empty(internal)) {
+      st_cast(suppressWarnings(st_collection_extract(internal, "POLYGON")), "POLYGON")
+    } else st_sfc(crs = EA)
+    area <- function(g) sum(as.numeric(st_area(g)))
+    tibble(
+      district      = d,
+      iou           = area(st_intersection(ga, gb)) / area(st_union(ga, gb)),
+      symdiff_km2   = area(sd) / 1e6,
+      mean_width_m  = area(sd) / sum(as.numeric(st_length(st_boundary(ga)))),
+      n_pieces      = length(pieces),
+      largest_piece_km2 = if (length(pieces)) max(as.numeric(st_area(pieces))) / 1e6 else 0
+    )
+  }) |>
+    mutate(outline_change_km2 = as.numeric(st_area(outline_change)) / 1e6)
+}
+```
+
+### New Jersey, 103rd-105th vs. 106th-107th
+
+```{r}
+nj_cmp <- compare_vintages(nj_a, nj_b)
+nj_cmp |> mutate(across(-district, \(x) round(x, 3))) |> print(n = Inf)
+```
+
+Every one of the 13 districts differs, by a sliver averaging a few tens of
+meters wide broken into well over a hundred pieces, and the largest piece
+of territory that actually changes district is under one square kilometer.
+Only District 13 (`r sprintf("%.3f", nj_cmp$iou[nj_cmp$district == 13])`)
+falls below the 0.99 merge threshold, which is why the two vintages were
+never joined. The largest *outline* changes are tidal marsh along Delaware
+Bay in Salem and Cumberland counties.
+
+### Texas, 105th-106th vs. 107th
+
+```{r}
+tx_cmp <- compare_vintages(tx_a, tx_b)
+tx_cmp |> mutate(across(-district, \(x) round(x, 3))) |> print(n = Inf)
+```
+
+Same signature across all 30 districts: slivers roughly 20-45 m wide,
+hundreds to thousands of pieces, no single internal piece bigger than about
+7 km^2 (and those few are rural West Texas county-line realignments in
+Districts 13, 17, and 19 -- districts the *Vera* court never touched).
+The large outline changes are the New Mexico state line, Matagorda Bay,
+the Red River, and the Rio Grande.
+
+### The same pattern in Census's own files
+
+As an independent check, the Census Bureau's archived generalized
+congressional district files
+(<https://www2.census.gov/geo/tiger/PREVGENZ/cd/>) can be compared the
+same way between consecutive Congresses. If the Census had recorded a
+redistricting, its own files would show whole-block transfers.
+
+```{r}
+#| message: false
+#| warning: false
+#| results: hide
+census_cd <- function(state_fips, cong) {
+  zip <- sprintf("cd%s_%03i_shp.zip", state_fips, cong)
+  url <- sprintf("https://www2.census.gov/geo/tiger/PREVGENZ/cd/cd%03ishp/%s", cong, zip)
+  dir <- file.path(tempdir(), "census_cd", tools::file_path_sans_ext(zip))
+  if (!dir.exists(dir)) {
+    dir.create(dir, recursive = TRUE)
+    download.file(url, file.path(dir, zip), mode = "wb", quiet = TRUE)
+    unzip(file.path(dir, zip), exdir = dir)
+  }
+  shp <- list.files(dir, pattern = "\\.shp$", full.names = TRUE)[1]
+  x <- st_read(shp, quiet = TRUE)
+  cd_col <- grep("^CD[0-9]*$", names(x), ignore.case = TRUE, value = TRUE)[1]
+  st_set_crs(x, 4269) |>
+    st_transform(EA) |>
+    mutate(district = suppressWarnings(as.integer(.data[[cd_col]]))) |>
+    filter(!is.na(district)) |>   # drop non-district (water) polygons
+    group_by(district) |>
+    summarize(geometry = st_union(geometry), .groups = "drop") |>
+    arrange(district)
+}
+tx_census_cmp <- compare_vintages(census_cd("48", 106), census_cd("48", 107))
+nj_census_cmp <- compare_vintages(census_cd("34", 105), census_cd("34", 106))
+```
+
+```{r}
+tx_census_cmp |> mutate(across(-district, \(x) round(x, 3))) |> print(n = Inf)
+```
+
+Census's own 106th- and 107th-Congress Texas files show essentially the
+same sliver-everywhere pattern (the 107th file is in the Census 2000-era
+cartographic boundary layout, i.e. it was regenerated from the new line
+work). Nothing resembling a district-to-district transfer.
+
+```{r}
+nj_census_cmp |> mutate(across(-district, \(x) round(x, 3))) |> print(n = Inf)
+```
+
+For New Jersey, Census's generalized 105th and 106th files are nearly
+identical to each other: the only differences are two sub-square-kilometer
+pieces (one of them open water in Raritan Bay), confirming there was no
+redistricting between the two Congresses.
+
+## Fix
+
+Merge each pair into a single range. Following the convention of
+`dedup_districts()` in `R/dedup.R` (which keeps the latest vintage's
+geometry, `geometry[n()]`, when it joins consecutive Congresses), the
+merged files use the later vintage's shapes. All non-geometry attributes
+other than the Congress range and the derived `id` are identical between
+the two vintages, which we check first.
+
+```{r}
+attr_cols <- function(x) st_drop_geometry(x) |> select(-startcong, -endcong, -id)
+stopifnot(identical(attr_cols(nj_a), attr_cols(nj_b)))
+stopifnot(identical(attr_cols(tx_a), attr_cols(tx_b)))
+```
+
+```{r}
+append_rnote <- function(x, text) {
+  x |> mutate(rnote = if_else(
+    rnote == "",
+    sprintf('{"%s"}', text),
+    str_replace(rnote, "\\}$", paste0(',"', text, '"}'))
+  ))
+}
+
+merge_vintages <- function(later, state_fips, first_cong, last_cong, note) {
+  later |>
+    mutate(startcong = first_cong, endcong = last_cong) |>
+    mutate(id = sprintf("%03i%03i%03i%03i", state_fips, startcong, endcong, district)) |>
+    append_rnote(note) |>
+    arrange(district)
+}
+
+nj_note <- paste(
+  "GitHub issue #36 (see Patches/12-merge_nj_tx_vintages_issue36): the",
+  "103rd-105th and 106th-107th Congress shapes differed only by Census",
+  "TIGER line-vintage slivers and coastline realignment, not by any",
+  "redistricting (no New Jersey plan changed between 1992 and 2002).",
+  "Merged into one 103rd-107th range using the later vintage's geometry."
+)
+tx_note <- paste(
+  "GitHub issue #36 (see Patches/12-merge_nj_tx_vintages_issue36): the",
+  "105th-106th and 107th Congress shapes differed only by Census TIGER",
+  "line-vintage slivers and coastline/state-line realignment, not by any",
+  "redistricting (the 1996 Vera v. Bush interim plan stayed in force",
+  "through the 2000 election). Merged into one 105th-107th range using",
+  "the later vintage's geometry."
+)
+
+new_nj <- merge_vintages(nj_b, 34, 103, 107, nj_note)
+new_tx <- merge_vintages(tx_b, 48, 105, 107, tx_note)
+```
+
+## Validate
+
+```{r}
+validate <- function(x, n_expected, state_fips) {
+  x$statefp_code <- state_fips
+  print(as_tibble(st_drop_geometry(x))[, c("district", "startcong", "endcong", "id")], n = Inf)
+  stopifnot(nrow(x) == n_expected)
+  stopifnot(all(x$district == seq_len(n_expected)))
+  stopifnot(all(x$id == sprintf("%03i%03i%03i%03i", x$statefp_code, x$startcong, x$endcong, x$district)))
+  stopifnot(all(st_is_valid(x)))
+  # no pairwise overlap between districts beyond boundary noise
+  xp <- st_transform(x, EA)
+  combos <- combn(nrow(xp), 2)
+  max_overlap <- max(map_dbl(seq_len(ncol(combos)), function(i) {
+    sum(as.numeric(st_area(st_intersection(st_geometry(xp)[combos[1, i]],
+                                           st_geometry(xp)[combos[2, i]]))))
+  }))
+  cat("max pairwise overlap (m^2):", max_overlap, "\n")
+  stopifnot(max_overlap < 1)
+  invisible(x)
+}
+validate(new_nj, 13, 34)
+validate(new_tx, 30, 48)
+```
+
+Thirteen New Jersey districts and thirty Texas districts, all valid, with
+no overlap between districts, and unchanged geometry relative to the later
+vintage file each one replaces.
+
+## Write out the merged files
+
+```{r}
+unlink("../../GeoJson/New Jersey_103_to_105.geojson")
+unlink("../../GeoJson/New Jersey_106_to_107.geojson")
+st_write(new_nj, "../../GeoJson/New Jersey_103_to_107.geojson", append = FALSE)
+
+unlink("../../GeoJson/Texas_105_to_106.geojson")
+unlink("../../GeoJson/Texas_107_to_107.geojson")
+st_write(new_tx, "../../GeoJson/Texas_105_to_107.geojson", append = FALSE)
+```
+
+```{r}
+list.files("../../GeoJson", pattern = "^(New Jersey|Texas)_1(0[3-9]|1[0-2])_to_")
+```
+
+New Jersey now goes 099-102, 103-107, 108-112 and Texas 103-104, 105-107,
+108, 109, 110-112 -- one file per plan actually in force, with no gaps or
+overlaps in Congress coverage.
